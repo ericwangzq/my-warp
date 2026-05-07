@@ -1501,9 +1501,14 @@ impl AISettings {
         let is_anonymous_or_logged_out = AuthStateProvider::as_ref(app)
             .get()
             .is_anonymous_or_logged_out();
+        #[cfg(not(target_family = "wasm"))]
+        let has_local_github_copilot_oauth =
+            crate::ai::github_copilot_client::read_github_oauth_token(app).is_ok();
+        #[cfg(target_family = "wasm")]
+        let has_local_github_copilot_oauth = false;
 
         *self.is_any_ai_enabled
-            && !is_anonymous_or_logged_out
+            && (!is_anonymous_or_logged_out || has_local_github_copilot_oauth)
             && !self.is_ai_disabled_due_to_remote_session_org_policy(app)
     }
 
