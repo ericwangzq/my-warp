@@ -41,8 +41,13 @@ jobs:
       - name: Install create-dmg
         run: brew install create-dmg
 
-      - name: Install protobuf (protoc)
-        run: brew install protobuf
+      - name: Install protobuf
+        run: |
+          brew install protobuf
+          echo "PROTOC=$(brew --prefix protobuf)/bin/protoc" >> "$GITHUB_ENV"
+
+      - name: Verify protoc
+        run: protoc --version
 
       - name: Build DMG (unsigned)
         run: ./script/bundle --channel oss --nosign --nouniversal
