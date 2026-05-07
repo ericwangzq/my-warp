@@ -25,6 +25,9 @@ const DEFAULT_COPILOT_CHAT_COMPLETIONS_URL: &str = "https://api.githubcopilot.co
 const DEFAULT_COPILOT_OPENAI_BASE_URL: &str = "https://api.githubcopilot.com";
 const DEFAULT_COPILOT_MODEL: &str = "gpt-4o";
 const TOKEN_REFRESH_SKEW_SECONDS: i64 = 60;
+const REQUEST_TIMEOUT_SECONDS: u64 = 60;
+const CONNECT_TIMEOUT_SECONDS: u64 = 15;
+const RETRY_DELAYS_MS: [u64; 3] = [300, 1000, 2500];
 
 #[derive(Clone)]
 pub struct GitHubCopilotClient {
@@ -176,9 +179,7 @@ impl GitHubCopilotClient {
         chat_completions_url: String,
     ) -> Result<Self, GitHubCopilotClientError> {
         Ok(Self {
-            http_client: reqwest::Client::builder()
-                .default_headers(default_headers()?)
-                .build()?,
+            http_client: default_http_client()?,
             github_token,
             token_url,
             chat_completions_url,
@@ -234,13 +235,13 @@ impl GitHubCopilotClient {
         T: DeserializeOwned,
     {
         let token = self.copilot_token().await?;
-        let response = self
-            .http_client
-            .post(&self.chat_completions_url)
-            .bearer_auth(token)
-            .json(request)
-            .send()
-            .await?;
+        let response = retry_request(|| {
+            self.http_client
+                .post(&self.chat_completions_url)
+                .bearer_auth(token.clone())
+                .json(request)
+        })
+        .await?;
 
         if !response.status().is_success() {
             return Err(GitHubCopilotClientError::ChatCompletionFailed {
@@ -257,12 +258,13 @@ impl GitHubCopilotClient {
             return Ok(token);
         }
 
-        let response = self
-            .http_client
-            .get(&self.token_url)
-            .header(AUTHORIZATION, format!("token {}", self.github_token))
-            .send()
-            .await?;
+        let authorization = format!("token {}", self.github_token);
+        let response = retry_request(|| {
+            self.http_client
+                .get(&self.token_url)
+                .header(AUTHORIZATION, authorization.clone())
+        })
+        .await?;
 
         if !response.status().is_success() {
             return Err(GitHubCopilotClientError::TokenExchangeFailed {
@@ -305,9 +307,7 @@ impl GitHubCopilotOAuth {
         access_token_url: String,
     ) -> Result<Self, GitHubCopilotClientError> {
         Ok(Self {
-            http_client: reqwest::Client::builder()
-                .default_headers(default_headers()?)
-                .build()?,
+            http_client: default_http_client()?,
             client_id,
             device_code_url,
             access_token_url,
@@ -490,6 +490,44 @@ fn use_local_dev_storage() -> bool {
 
 fn local_dev_storage_path() -> std::path::PathBuf {
     paths::state_dir().join(GITHUB_COPILOT_OAUTH_DEV_STORAGE_FILE)
+}
+
+fn default_http_client() -> Result<reqwest::Client, GitHubCopilotClientError> {
+    Ok(reqwest::Client::builder()
+        .default_headers(default_headers()?)
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECONDS))
+        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
+        .http1_only()
+        .build()?)
+}
+
+async fn retry_request<F>(
+    mut build_request: F,
+) -> Result<reqwest::Response, GitHubCopilotClientError>
+where
+    F: FnMut() -> reqwest::RequestBuilder,
+{
+    let mut last_retryable_error = None;
+    for delay_ms in RETRY_DELAYS_MS {
+        match build_request().send().await {
+            Ok(response) => return Ok(response),
+            Err(err) if should_retry_transport_error(&err) => {
+                log::warn!("GitHub Copilot transport error, retrying: {err}");
+                last_retryable_error = Some(err);
+                warpui::r#async::Timer::after(Duration::from_millis(delay_ms)).await;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    build_request()
+        .send()
+        .await
+        .map_err(|err| last_retryable_error.unwrap_or(err).into())
+}
+
+fn should_retry_transport_error(err: &reqwest::Error) -> bool {
+    err.is_connect() || err.is_timeout() || err.is_request()
 }
 
 fn default_model() -> String {

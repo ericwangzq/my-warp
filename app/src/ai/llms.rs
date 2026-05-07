@@ -129,6 +129,8 @@ impl LLMProvider {
 }
 
 pub const GITHUB_COPILOT_MODEL_ID_PREFIX: &str = "github-copilot/";
+pub const GITHUB_COPILOT_DEFAULT_MODEL_NAME: &str = "gpt-4.1";
+
 pub fn is_github_copilot_model_id(id: &LLMId) -> bool {
     id.as_str().starts_with(GITHUB_COPILOT_MODEL_ID_PREFIX)
 }
@@ -478,32 +480,63 @@ fn default_computer_use_llms() -> AvailableLLMs {
 
 fn augment_with_github_copilot_models(models: &mut ModelsByFeature) {
     let copilot_models = github_copilot_llm_infos();
-    append_missing_llms(&mut models.agent_mode.choices, &copilot_models);
-    append_missing_llms(&mut models.coding.choices, &copilot_models);
-    if let Some(cli_agent) = &mut models.cli_agent {
-        append_missing_llms(&mut cli_agent.choices, &copilot_models);
-    }
-}
+    let default_id: LLMId =
+        format!("{GITHUB_COPILOT_MODEL_ID_PREFIX}{GITHUB_COPILOT_DEFAULT_MODEL_NAME}").into();
 
-fn append_missing_llms(choices: &mut Vec<LLMInfo>, models: &[LLMInfo]) {
-    for model in models {
-        if !choices.iter().any(|choice| choice.id == model.id) {
-            choices.push(model.clone());
-        }
+    models.agent_mode.default_id = default_id.clone();
+    models.agent_mode.choices = copilot_models.clone();
+
+    models.coding.default_id = default_id.clone();
+    models.coding.choices = copilot_models.clone();
+
+    if let Some(cli_agent) = &mut models.cli_agent {
+        cli_agent.default_id = default_id;
+        cli_agent.choices = copilot_models;
     }
 }
 
 fn github_copilot_llm_infos() -> Vec<LLMInfo> {
-    ["gpt-4o", "gpt-4o-mini", "claude-sonnet-4-5", "o3-mini"]
-        .into_iter()
-        .map(github_copilot_llm_info)
-        .collect()
+    [
+        ("gpt-4.1", "GPT-4.1", true),
+        ("gpt-5-mini", "GPT-5 mini", true),
+        ("gpt-5.2", "GPT-5.2", true),
+        ("gpt-5.2-codex", "GPT-5.2-Codex", false),
+        ("gpt-5.3-codex", "GPT-5.3-Codex", false),
+        ("gpt-5.4", "GPT-5.4", true),
+        ("gpt-5.4-mini", "GPT-5.4 mini", true),
+        ("claude-haiku-4.5", "Claude Haiku 4.5", true),
+        ("claude-opus-4.5", "Claude Opus 4.5", true),
+        ("claude-opus-4.6", "Claude Opus 4.6", true),
+        ("claude-opus-4.6-fast", "Claude Opus 4.6 fast mode", true),
+        ("claude-opus-4.7", "Claude Opus 4.7", true),
+        ("claude-sonnet-4", "Claude Sonnet 4", true),
+        ("claude-sonnet-4.5", "Claude Sonnet 4.5", true),
+        ("claude-sonnet-4.6", "Claude Sonnet 4.6", true),
+        ("gemini-2.5-pro", "Gemini 2.5 Pro", true),
+        ("gemini-3-flash", "Gemini 3 Flash", true),
+        ("gemini-3.1-pro", "Gemini 3.1 Pro", true),
+        ("grok-code-fast-1", "Grok Code Fast 1", false),
+        ("raptor-mini", "Raptor mini", false),
+        ("goldeneye", "Goldeneye", false),
+        // Kept because the Copilot OpenAI-compatible endpoint has accepted it
+        // in local manual testing, even though the current public docs list
+        // GPT-4.1 as the default GPT-4 family model.
+        ("gpt-4o", "GPT-4o", true),
+        ("gpt-4o-mini", "GPT-4o mini", true),
+        ("claude-sonnet-4-5", "Claude Sonnet 4.5", true),
+        ("o3-mini", "o3-mini", false),
+    ]
+    .into_iter()
+    .map(|(id, display_name, vision_supported)| {
+        github_copilot_llm_info(id, display_name, vision_supported)
+    })
+    .collect()
 }
 
-fn github_copilot_llm_info(model: &str) -> LLMInfo {
+fn github_copilot_llm_info(model: &str, display_name: &str, vision_supported: bool) -> LLMInfo {
     LLMInfo {
-        display_name: format!("{model} from GitHub Copilot"),
-        base_model_name: model.to_string(),
+        display_name: format!("{display_name} from GitHub Copilot"),
+        base_model_name: display_name.to_string(),
         id: format!("{GITHUB_COPILOT_MODEL_ID_PREFIX}{model}").into(),
         reasoning_level: None,
         usage_metadata: LLMUsageMetadata {
@@ -512,7 +545,7 @@ fn github_copilot_llm_info(model: &str) -> LLMInfo {
         },
         description: None,
         disable_reason: None,
-        vision_supported: matches!(model, "gpt-4o" | "gpt-4o-mini" | "claude-sonnet-4-5"),
+        vision_supported,
         spec: None,
         provider: LLMProvider::GitHubCopilot,
         host_configs: HashMap::new(),
@@ -854,41 +887,33 @@ impl LLMPreferences {
         self.models_by_feature.agent_mode.info_for_id(id).is_some()
     }
 
-    /// Creates a pane-level override for the Agent Mode LLM.
+    /// Updates the Agent Mode LLM for the current pane and persists it as the
+    /// active profile's default so newly-created sessions inherit the last
+    /// selected model.
     pub fn update_preferred_agent_mode_llm(
         &mut self,
         preferred_llm_id: &LLMId,
         terminal_view_id: EntityId,
         ctx: &mut ModelContext<Self>,
     ) {
-        let profile =
-            AIExecutionProfilesModel::as_ref(ctx).active_profile(Some(terminal_view_id), ctx);
+        let profile_id = *AIExecutionProfilesModel::as_ref(ctx)
+            .active_profile(Some(terminal_view_id), ctx)
+            .id();
 
-        let profile_default_model_id = profile
-            .data()
-            .base_model
-            .as_ref()
-            .and_then(|id| self.models_by_feature.agent_mode.info_for_id(id))
-            .unwrap_or_else(|| self.models_by_feature.agent_mode.default_llm_info())
-            .id
-            .clone();
+        AIExecutionProfilesModel::handle(ctx).update(ctx, |profiles, ctx| {
+            profiles.set_base_model(profile_id, Some(preferred_llm_id.clone()), ctx);
+            profiles.set_context_window_limit(profile_id, None, ctx);
+        });
 
-        // Only remove override if we're setting to the profile's default.
-        // Otherwise, always set the override explicitly.
-        let changed = if preferred_llm_id == &profile_default_model_id {
-            self.base_llm_for_terminal_view
-                .remove(&terminal_view_id)
-                .is_some()
-        } else {
-            self.base_llm_for_terminal_view
-                .insert(terminal_view_id, preferred_llm_id.clone());
-            true
-        };
+        let old = self
+            .base_llm_for_terminal_view
+            .insert(terminal_view_id, preferred_llm_id.clone());
+        let changed = old.as_ref() != Some(preferred_llm_id);
 
         if changed {
             self.trigger_snapshot_save(ctx);
-            ctx.emit(LLMPreferencesEvent::UpdatedActiveAgentModeLLM);
         }
+        ctx.emit(LLMPreferencesEvent::UpdatedActiveAgentModeLLM);
     }
 
     /// Triggers a snapshot save to persist LLM override changes.
