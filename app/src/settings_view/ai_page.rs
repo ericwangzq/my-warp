@@ -9,6 +9,11 @@ use crate::ai::execution_profiles::profiles::{
     AIExecutionProfilesModel, AIExecutionProfilesModelEvent, ClientProfileId,
 };
 use crate::ai::execution_profiles::{AIExecutionProfile, ActionPermission, WriteToPtyPermission};
+#[cfg(not(target_family = "wasm"))]
+use crate::ai::github_copilot_client::{
+    read_github_oauth_token, remove_github_oauth_token, write_github_oauth_token,
+    GitHubCopilotOAuth, GitHubDeviceAuthorization,
+};
 use crate::ai::llms::{LLMContextWindow, LLMId, LLMPreferences, LLMPreferencesEvent};
 use crate::ai::mcp::TemplatableMCPServerManager;
 use crate::ai::paths::host_native_absolute_path;
@@ -455,6 +460,18 @@ pub struct AISettingsPageView {
     // Profile views
     profile_views: Vec<ViewHandle<ExecutionProfileView>>,
     add_profile_button: ViewHandle<ActionButton>,
+    #[cfg(not(target_family = "wasm"))]
+    github_copilot_oauth_status: GitHubCopilotOAuthStatus,
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[derive(Clone, Debug, Default)]
+enum GitHubCopilotOAuthStatus {
+    #[default]
+    Idle,
+    Starting,
+    WaitingForAuthorization(GitHubDeviceAuthorization),
+    Failed(String),
 }
 
 impl AISettingsPageView {
@@ -1433,6 +1450,8 @@ impl AISettingsPageView {
             conversation_layout_dropdown,
             profile_views,
             add_profile_button,
+            #[cfg(not(target_family = "wasm"))]
+            github_copilot_oauth_status: Default::default(),
         }
     }
 
@@ -2260,6 +2279,12 @@ pub enum AISettingsPageAction {
     RemoveFromMCPDenylist(uuid::Uuid),
     CreateProfile,
     SignupAnonymousUser,
+    #[cfg(not(target_family = "wasm"))]
+    ConnectGitHubCopilot,
+    #[cfg(not(target_family = "wasm"))]
+    DisconnectGitHubCopilot,
+    #[cfg(not(target_family = "wasm"))]
+    CopyGitHubCopilotDeviceCode(String),
     ToggleAwsBedrockAutoLogin,
     ToggleAwsBedrockCredentialsEnabled,
     RefreshAwsBedrockCredentials,
@@ -2939,6 +2964,116 @@ impl TypedActionView for AISettingsPageView {
             }
             AISettingsPageAction::SignupAnonymousUser => {
                 ctx.emit(AISettingsPageEvent::SignupAnonymousUser);
+            }
+            #[cfg(not(target_family = "wasm"))]
+            AISettingsPageAction::ConnectGitHubCopilot => {
+                self.github_copilot_oauth_status = GitHubCopilotOAuthStatus::Starting;
+                ctx.spawn(
+                    async {
+                        let oauth = GitHubCopilotOAuth::new()?;
+                        let authorization = oauth.start_device_authorization().await?;
+                        Ok::<_, crate::ai::github_copilot_client::GitHubCopilotClientError>((
+                            oauth,
+                            authorization,
+                        ))
+                    },
+                    |view, result, ctx| {
+                        match result {
+                            Ok((oauth, authorization)) => {
+                                if let Some(url) = authorization.verification_uri_complete.as_deref()
+                                {
+                                    ctx.open_url(url);
+                                } else {
+                                    ctx.open_url(&authorization.verification_uri);
+                                }
+                                view.github_copilot_oauth_status =
+                                    GitHubCopilotOAuthStatus::WaitingForAuthorization(
+                                        authorization.clone(),
+                                    );
+                                let expected_device_code = authorization.device_code.clone();
+                                ctx.spawn(
+                                    async move { oauth.wait_for_access_token(&authorization).await },
+                                    move |view, result, ctx| {
+                                        let is_current_flow = matches!(
+                                            &view.github_copilot_oauth_status,
+                                            GitHubCopilotOAuthStatus::WaitingForAuthorization(
+                                                authorization
+                                            ) if authorization.device_code == expected_device_code
+                                        );
+                                        if !is_current_flow {
+                                            return;
+                                        }
+
+                                        match result {
+                                            Ok(token) => {
+                                                if let Err(err) =
+                                                    write_github_oauth_token(ctx, &token)
+                                                {
+                                                    log::warn!(
+                                                        "Failed to store GitHub Copilot OAuth token: {err}"
+                                                    );
+                                                    view.github_copilot_oauth_status =
+                                                        GitHubCopilotOAuthStatus::Failed(
+                                                            err.to_string(),
+                                                        );
+                                                } else {
+                                                    view.github_copilot_oauth_status =
+                                                        GitHubCopilotOAuthStatus::Idle;
+                                                    LLMPreferences::handle(ctx).update(
+                                                        ctx,
+                                                        |prefs, ctx| {
+                                                            prefs
+                                                                .reconcile_disabled_model_preferences(
+                                                                    ctx,
+                                                                );
+                                                            ctx.emit(
+                                                                LLMPreferencesEvent::UpdatedAvailableLLMs,
+                                                            );
+                                                        },
+                                                    );
+                                                }
+                                            }
+                                            Err(err) => {
+                                                log::warn!("GitHub Copilot OAuth failed: {err}");
+                                                view.github_copilot_oauth_status =
+                                                    GitHubCopilotOAuthStatus::Failed(
+                                                        err.to_string(),
+                                                    );
+                                            }
+                                        }
+                                        ctx.notify();
+                                    },
+                                );
+                            }
+                            Err(err) => {
+                                log::warn!("GitHub Copilot OAuth failed: {err}");
+                                view.github_copilot_oauth_status =
+                                    GitHubCopilotOAuthStatus::Failed(err.to_string());
+                            }
+                        }
+                        ctx.notify();
+                    },
+                );
+                ctx.notify();
+            }
+            #[cfg(not(target_family = "wasm"))]
+            AISettingsPageAction::DisconnectGitHubCopilot => {
+                if let Err(err) = remove_github_oauth_token(ctx) {
+                    log::debug!("No GitHub Copilot OAuth token to remove: {err}");
+                }
+                self.github_copilot_oauth_status = GitHubCopilotOAuthStatus::Idle;
+                LLMPreferences::handle(ctx).update(ctx, |prefs, ctx| {
+                    prefs.reconcile_disabled_model_preferences(ctx);
+                });
+                ctx.notify();
+            }
+            #[cfg(not(target_family = "wasm"))]
+            AISettingsPageAction::CopyGitHubCopilotDeviceCode(code) => {
+                ctx.clipboard()
+                    .write(warpui::clipboard::ClipboardContent::plain_text(
+                        code.clone(),
+                    ));
+                ctx.notify();
             }
             AISettingsPageAction::ToggleAwsBedrockAutoLogin => {
                 AISettings::handle(ctx).update(ctx, |settings, ctx| {
@@ -6310,9 +6445,12 @@ struct ApiKeysWidget {
     openai_api_key_editor: ViewHandle<EditorView>,
     anthropic_api_key_editor: ViewHandle<EditorView>,
     google_api_key_editor: ViewHandle<EditorView>,
+    #[cfg(not(target_family = "wasm"))]
+    github_copilot_connect_button: MouseStateHandle,
+    #[cfg(not(target_family = "wasm"))]
+    github_copilot_disconnect_button: MouseStateHandle,
 
     can_use_warp_credits_with_byok: SwitchStateHandle,
-    upgrade_highlight_index: HighlightedHyperlink,
 }
 
 impl ApiKeysWidget {
@@ -6320,7 +6458,6 @@ impl ApiKeysWidget {
         let ai_settings = AISettings::as_ref(ctx);
         let workspace_handle = UserWorkspaces::handle(ctx);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(ctx);
-        let is_byo_enabled = workspace_handle.as_ref(ctx).is_byo_api_key_enabled();
 
         let ApiKeys {
             openai: openai_key,
@@ -6358,7 +6495,7 @@ impl ApiKeysWidget {
                 });
                 AISettingsPageView::update_editor_interaction_state(
                     $editor.clone(),
-                    is_any_ai_enabled && is_byo_enabled,
+                    is_any_ai_enabled,
                     ctx,
                 );
                 ctx.subscribe_to_view(&$editor, |_, $editor, event, ctx| {
@@ -6375,19 +6512,8 @@ impl ApiKeysWidget {
                     if let UserWorkspacesEvent::TeamsChanged = event {
                         let is_any_ai_enabled =
                             AISettings::handle(ctx).as_ref(ctx).is_any_ai_enabled(ctx);
-                        let is_byo_enabled = workspace.as_ref(ctx).is_byo_api_key_enabled();
-                        let is_enabled = is_any_ai_enabled && is_byo_enabled;
-                        let has_key = !editor_clone.as_ref(ctx).is_empty(ctx);
-
-                        // If BYO is disabled, clear the API key from the editor and storage
-                        if !is_byo_enabled && has_key {
-                            editor_clone.update(ctx, |editor, ctx| {
-                                editor.set_buffer_text("", ctx);
-                            });
-                            ApiKeyManager::handle(ctx).update(ctx, |model, ctx| {
-                                model.$set_func(None, ctx);
-                            });
-                        }
+                        let is_enabled = is_any_ai_enabled;
+                        let _ = workspace;
 
                         AISettingsPageView::update_editor_interaction_state(
                             editor_clone.clone(),
@@ -6418,28 +6544,31 @@ impl ApiKeysWidget {
             openai_api_key_editor,
             anthropic_api_key_editor,
             google_api_key_editor,
+            #[cfg(not(target_family = "wasm"))]
+            github_copilot_connect_button: Default::default(),
+            #[cfg(not(target_family = "wasm"))]
+            github_copilot_disconnect_button: Default::default(),
 
             can_use_warp_credits_with_byok: Default::default(),
-            upgrade_highlight_index: Default::default(),
         }
     }
 
     fn render_api_keys_section(
         &self,
+        view: &AISettingsPageView,
         appearance: &Appearance,
         app: &AppContext,
-        is_byo_enabled: bool,
     ) -> Box<dyn Element> {
         let ai_settings = AISettings::as_ref(app);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
-        let is_enabled = is_any_ai_enabled && is_byo_enabled;
+        let is_enabled = is_any_ai_enabled;
 
         let mut column = Flex::column()
             .with_spacing(16.)
             .with_child(
                 Container::new(
                     render_ai_setting_description(
-                        "Use your own API keys from model providers for the Warp Agent to use. API keys are stored locally and never synced to the cloud. Using auto models or models from providers you have not provided API keys for will consume Warp credits.",
+                        "Use your own provider credentials for the Warp Agent to use. Built-in Warp AI currently supports provider API keys stored locally and never synced to the cloud. ChatGPT, Claude, Gemini, and GitHub Copilot subscription accounts cannot be connected here as OAuth model credentials. Using auto models or models from providers you have not provided credentials for will consume Warp credits.",
                         is_enabled,
                         app,
                     ))
@@ -6488,83 +6617,39 @@ impl ApiKeysWidget {
 
         column.add_child(render_api_key_input(
             appearance,
-            "OpenAI API Key",
+            "ChatGPT / OpenAI API Key",
             self.openai_api_key_editor.clone(),
             is_enabled,
             app,
         ));
         column.add_child(render_api_key_input(
             appearance,
-            "Anthropic API Key",
+            "Claude / Anthropic API Key",
             self.anthropic_api_key_editor.clone(),
             is_enabled,
             app,
         ));
         column.add_child(render_api_key_input(
             appearance,
-            "Google API Key",
+            "Gemini / Google API Key",
             self.google_api_key_editor.clone(),
             is_enabled,
             app,
         ));
 
-        // Show upgrade CTA if BYOK is not enabled
-        if !is_byo_enabled {
-            let auth_state = AuthStateProvider::as_ref(app).get();
-            let upgrade_text_fragments = if let Some(team) =
-                UserWorkspaces::as_ref(app).current_team()
-            {
-                // Enterprise teams don't have a self-serve upgrade path; route them
-                // to sales to enable BYOK on their existing plan.
-                if team.billing_metadata.customer_type == CustomerType::Enterprise {
-                    vec![
-                        FormattedTextFragment::hyperlink("Contact sales", "mailto:sales@warp.dev"),
-                        FormattedTextFragment::plain_text(
-                            " to enable bringing your own API keys on your Enterprise plan.",
-                        ),
-                    ]
-                } else {
-                    let current_user_email = auth_state.user_email().unwrap_or_default();
-                    let has_admin_permissions = team.has_admin_permissions(&current_user_email);
-                    let upgrade_url = UserWorkspaces::upgrade_link_for_team(team.uid);
-                    if has_admin_permissions {
-                        vec![
-                            FormattedTextFragment::hyperlink(
-                                "Upgrade to the Build plan",
-                                upgrade_url,
-                            ),
-                            FormattedTextFragment::plain_text(" to use your own API keys."),
-                        ]
-                    } else {
-                        vec![FormattedTextFragment::plain_text(
-                            "Ask your team's admin to upgrade to the Build plan to use your own API keys.",
-                        )]
-                    }
-                }
-            } else {
-                let user_id = auth_state.user_id().unwrap_or_default();
-                let upgrade_url = UserWorkspaces::upgrade_link(user_id);
-                vec![
-                    FormattedTextFragment::hyperlink("Upgrade to the Build plan", upgrade_url),
-                    FormattedTextFragment::plain_text(" to use your own API keys."),
-                ]
-            };
-
-            let upgrade_text_element = FormattedTextElement::new(
-                FormattedText::new([FormattedTextLine::Line(upgrade_text_fragments)]),
-                appearance.ui_font_size(),
-                appearance.ui_font_family(),
-                appearance.ui_font_family(),
-                blended_colors::text_sub(appearance.theme(), appearance.theme().surface_1()),
-                self.upgrade_highlight_index.clone(),
-            )
-            .with_hyperlink_font_color(appearance.theme().accent().into_solid())
-            .register_default_click_handlers(|url, ctx, _| {
-                ctx.dispatch_typed_action(AISettingsPageAction::HyperlinkClick(url));
-            });
-
-            column.add_child(Container::new(upgrade_text_element.finish()).finish());
-        }
+        #[cfg(not(target_family = "wasm"))]
+        column.add_child(
+            Container::new(render_github_copilot_oauth_row(
+                appearance,
+                self.github_copilot_connect_button.clone(),
+                self.github_copilot_disconnect_button.clone(),
+                &view.github_copilot_oauth_status,
+                is_enabled,
+                app,
+            ))
+            .with_margin_top(4.)
+            .finish(),
+        );
 
         column.finish()
     }
@@ -6599,6 +6684,218 @@ impl ApiKeysWidget {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn render_github_copilot_oauth_row(
+    appearance: &Appearance,
+    connect_button_state: MouseStateHandle,
+    disconnect_button_state: MouseStateHandle,
+    oauth_status: &GitHubCopilotOAuthStatus,
+    is_enabled: bool,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let is_connected = read_github_oauth_token(app).is_ok();
+    let description: Cow<'static, str> = match oauth_status {
+        GitHubCopilotOAuthStatus::Starting => "Starting GitHub authorization...".into(),
+        GitHubCopilotOAuthStatus::WaitingForAuthorization(authorization) => {
+            return render_github_copilot_device_code_row(
+                appearance,
+                disconnect_button_state,
+                authorization,
+                is_enabled,
+                app,
+            );
+        }
+        GitHubCopilotOAuthStatus::Failed(error) => {
+            format!("GitHub authorization failed: {error}").into()
+        }
+        GitHubCopilotOAuthStatus::Idle if is_connected => {
+            "Connected with GitHub OAuth. Warp can exchange this authorization for short-lived Copilot tokens.".into()
+        }
+        GitHubCopilotOAuthStatus::Idle => {
+            if cfg!(debug_assertions) || ChannelState::channel() == warp_core::channel::Channel::Oss
+            {
+                "Connect GitHub Copilot with browser authorization. For local development, Warp stores this token in the local state directory.".into()
+            } else {
+                "Connect GitHub Copilot with browser authorization. Warp stores the GitHub OAuth token locally in secure storage.".into()
+            }
+        }
+    };
+
+    let text = Flex::column()
+        .with_spacing(4.)
+        .with_child(
+            Text::new_inline(
+                "GitHub Copilot OAuth",
+                appearance.ui_font_family(),
+                CONTENT_FONT_SIZE,
+            )
+            .with_color(styles::header_font_color(is_enabled, app).into())
+            .finish(),
+        )
+        .with_child(
+            appearance
+                .ui_builder()
+                .paragraph(description.clone())
+                .with_style(UiComponentStyles {
+                    font_size: Some(Appearance::as_ref(app).ui_font_size()),
+                    font_color: Some(styles::description_font_color(is_enabled, app).into()),
+                    margin: Some(Coords::default().right(16.)),
+                    ..Default::default()
+                })
+                .build()
+                .finish(),
+        )
+        .finish();
+
+    let action = if is_connected {
+        AISettingsPageAction::DisconnectGitHubCopilot
+    } else {
+        AISettingsPageAction::ConnectGitHubCopilot
+    };
+    let button_state = if is_connected {
+        disconnect_button_state
+    } else {
+        connect_button_state
+    };
+    let label = if is_connected {
+        "Disconnect"
+    } else {
+        "Connect"
+    };
+
+    let button = appearance
+        .ui_builder()
+        .button(ButtonVariant::Secondary, button_state)
+        .with_style(UiComponentStyles {
+            font_size: Some(12.),
+            padding: Some(Coords {
+                top: 4.,
+                bottom: 4.,
+                left: 8.,
+                right: 8.,
+            }),
+            ..Default::default()
+        })
+        .with_text_label(label.to_string())
+        .build()
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(action.clone());
+        });
+
+    Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(Expanded::new(1., text).finish())
+        .with_child(Box::new(button))
+        .finish()
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn render_github_copilot_device_code_row(
+    appearance: &Appearance,
+    disconnect_button_state: MouseStateHandle,
+    authorization: &GitHubDeviceAuthorization,
+    is_enabled: bool,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let description = format!(
+        "Enter code {} at {} to finish GitHub authorization.",
+        authorization.user_code, authorization.verification_uri
+    );
+
+    let text = Flex::column()
+        .with_spacing(4.)
+        .with_child(
+            Text::new_inline(
+                "GitHub Copilot OAuth",
+                appearance.ui_font_family(),
+                CONTENT_FONT_SIZE,
+            )
+            .with_color(styles::header_font_color(is_enabled, app).into())
+            .finish(),
+        )
+        .with_child(
+            Text::new_inline(
+                authorization.user_code.clone(),
+                appearance.monospace_font_family(),
+                CONTENT_FONT_SIZE + 2.,
+            )
+            .with_color(styles::header_font_color(is_enabled, app).into())
+            .finish(),
+        )
+        .with_child(
+            appearance
+                .ui_builder()
+                .paragraph(description)
+                .with_style(UiComponentStyles {
+                    font_size: Some(Appearance::as_ref(app).ui_font_size()),
+                    font_color: Some(styles::description_font_color(is_enabled, app).into()),
+                    margin: Some(Coords::default().right(16.)),
+                    ..Default::default()
+                })
+                .build()
+                .finish(),
+        )
+        .finish();
+
+    let copy_button_state = MouseStateHandle::default();
+    let user_code = authorization.user_code.clone();
+    let copy_button = appearance
+        .ui_builder()
+        .button(ButtonVariant::Secondary, copy_button_state)
+        .with_style(UiComponentStyles {
+            font_size: Some(12.),
+            padding: Some(Coords {
+                top: 4.,
+                bottom: 4.,
+                left: 8.,
+                right: 8.,
+            }),
+            ..Default::default()
+        })
+        .with_text_label("Copy".to_string())
+        .build()
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(AISettingsPageAction::CopyGitHubCopilotDeviceCode(
+                user_code.clone(),
+            ));
+        });
+
+    let cancel_button = appearance
+        .ui_builder()
+        .button(ButtonVariant::Secondary, disconnect_button_state)
+        .with_style(UiComponentStyles {
+            font_size: Some(12.),
+            padding: Some(Coords {
+                top: 4.,
+                bottom: 4.,
+                left: 8.,
+                right: 8.,
+            }),
+            ..Default::default()
+        })
+        .with_text_label("Cancel".to_string())
+        .build()
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(AISettingsPageAction::DisconnectGitHubCopilot);
+        });
+
+    Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(Expanded::new(1., text).finish())
+        .with_child(
+            Flex::row()
+                .with_spacing(8.)
+                .with_child(Box::new(copy_button))
+                .with_child(Box::new(cancel_button))
+                .finish(),
+        )
+        .finish()
+}
+
 impl SettingsWidget for ApiKeysWidget {
     type View = AISettingsPageView;
 
@@ -6614,7 +6911,6 @@ impl SettingsWidget for ApiKeysWidget {
     ) -> Box<dyn Element> {
         let ai_settings = AISettings::as_ref(app);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
-        let is_byo_enabled = UserWorkspaces::as_ref(app).is_byo_api_key_enabled();
 
         let mut column = Flex::column()
             .with_child(render_separator(appearance))
@@ -6627,15 +6923,13 @@ impl SettingsWidget for ApiKeysWidget {
                 .with_padding_bottom(HEADER_PADDING)
                 .finish(),
             )
-            .with_child(self.render_api_keys_section(appearance, app, is_byo_enabled));
+            .with_child(self.render_api_keys_section(view, appearance, app));
 
-        if is_byo_enabled {
-            column.add_child(
-                Container::new(self.render_can_use_warp_credits_with_byok_toggle(view, app))
-                    .with_margin_top(16.)
-                    .finish(),
-            );
-        }
+        column.add_child(
+            Container::new(self.render_can_use_warp_credits_with_byok_toggle(view, app))
+                .with_margin_top(16.)
+                .finish(),
+        );
 
         Container::new(column.finish())
             .with_margin_bottom(HEADER_PADDING)

@@ -26,16 +26,20 @@ use super::execution_profiles::profiles::AIExecutionProfilesModel;
 pub use ai::LLMId;
 
 /// Checks if a user's' API key is being used for the given provider.
-/// Returns `true` if BYO API key is enabled and a key exists for the provider.
+/// Returns `true` if a locally stored key exists for the provider.
 pub fn is_using_api_key_for_provider(provider: &LLMProvider, app: &AppContext) -> bool {
-    let api_keys = UserWorkspaces::as_ref(app)
-        .is_byo_api_key_enabled()
-        .then(|| ApiKeyManager::as_ref(app).keys().clone());
+    let api_keys = ApiKeyManager::as_ref(app).keys().clone();
 
     match provider {
-        LLMProvider::OpenAI => api_keys.is_some_and(|keys| keys.openai.is_some()),
-        LLMProvider::Anthropic => api_keys.is_some_and(|keys| keys.anthropic.is_some()),
-        LLMProvider::Google => api_keys.is_some_and(|keys| keys.google.is_some()),
+        LLMProvider::OpenAI => api_keys.openai.is_some(),
+        LLMProvider::Anthropic => api_keys.anthropic.is_some(),
+        LLMProvider::Google => api_keys.google.is_some(),
+        #[cfg(not(target_family = "wasm"))]
+        LLMProvider::GitHubCopilot => {
+            crate::ai::github_copilot_client::read_github_oauth_token(app).is_ok()
+        }
+        #[cfg(target_family = "wasm")]
+        LLMProvider::GitHubCopilot => false,
         _ => false,
     }
 }
@@ -105,6 +109,7 @@ pub enum LLMProvider {
     OpenAI,
     Anthropic,
     Google,
+    GitHubCopilot,
     Xai,
     Unknown,
 }
@@ -116,10 +121,24 @@ impl LLMProvider {
             LLMProvider::OpenAI => Some(Icon::OpenAILogo),
             LLMProvider::Anthropic => Some(Icon::ClaudeLogo),
             LLMProvider::Google => Some(Icon::GeminiLogo),
+            LLMProvider::GitHubCopilot => Some(Icon::CopilotLogo),
             LLMProvider::Xai => None,
             LLMProvider::Unknown => None,
         }
     }
+}
+
+pub const GITHUB_COPILOT_MODEL_ID_PREFIX: &str = "github-copilot/";
+pub fn is_github_copilot_model_id(id: &LLMId) -> bool {
+    id.as_str().starts_with(GITHUB_COPILOT_MODEL_ID_PREFIX)
+}
+
+pub fn github_copilot_model_name(id: &LLMId) -> Option<&str> {
+    is_github_copilot_model_id(id).then(|| {
+        id.as_str()
+            .strip_prefix(GITHUB_COPILOT_MODEL_ID_PREFIX)
+            .unwrap_or("gpt-4o")
+    })
 }
 
 /// The host where an LLM can be routed to.
@@ -457,6 +476,51 @@ fn default_computer_use_llms() -> AvailableLLMs {
     }
 }
 
+fn augment_with_github_copilot_models(models: &mut ModelsByFeature) {
+    let copilot_models = github_copilot_llm_infos();
+    append_missing_llms(&mut models.agent_mode.choices, &copilot_models);
+    append_missing_llms(&mut models.coding.choices, &copilot_models);
+    if let Some(cli_agent) = &mut models.cli_agent {
+        append_missing_llms(&mut cli_agent.choices, &copilot_models);
+    }
+}
+
+fn append_missing_llms(choices: &mut Vec<LLMInfo>, models: &[LLMInfo]) {
+    for model in models {
+        if !choices.iter().any(|choice| choice.id == model.id) {
+            choices.push(model.clone());
+        }
+    }
+}
+
+fn github_copilot_llm_infos() -> Vec<LLMInfo> {
+    ["gpt-4o", "gpt-4o-mini", "claude-sonnet-4-5", "o3-mini"]
+        .into_iter()
+        .map(github_copilot_llm_info)
+        .collect()
+}
+
+fn github_copilot_llm_info(model: &str) -> LLMInfo {
+    LLMInfo {
+        display_name: format!("{model} from GitHub Copilot"),
+        base_model_name: model.to_string(),
+        id: format!("{GITHUB_COPILOT_MODEL_ID_PREFIX}{model}").into(),
+        reasoning_level: None,
+        usage_metadata: LLMUsageMetadata {
+            request_multiplier: 1,
+            credit_multiplier: Some(0.),
+        },
+        description: None,
+        disable_reason: None,
+        vision_supported: matches!(model, "gpt-4o" | "gpt-4o-mini" | "claude-sonnet-4-5"),
+        spec: None,
+        provider: LLMProvider::GitHubCopilot,
+        host_configs: HashMap::new(),
+        discount_percentage: None,
+        context_window: LLMContextWindow::default(),
+    }
+}
+
 impl Default for ModelsByFeature {
     fn default() -> Self {
         Self {
@@ -556,7 +620,8 @@ pub struct LLMPreferences {
 
 impl LLMPreferences {
     pub fn new(ctx: &mut ModelContext<Self>) -> Self {
-        let models_by_feature = get_cached_models(ctx).unwrap_or_default();
+        let mut models_by_feature = get_cached_models(ctx).unwrap_or_default();
+        augment_with_github_copilot_models(&mut models_by_feature);
 
         ctx.subscribe_to_model(&NetworkStatus::handle(ctx), |me, event, ctx| {
             if let NetworkStatusEvent::NetworkStatusChanged {
@@ -963,7 +1028,8 @@ impl LLMPreferences {
         }
     }
 
-    fn on_server_update(&mut self, update: ModelsByFeature, ctx: &mut ModelContext<Self>) {
+    fn on_server_update(&mut self, mut update: ModelsByFeature, ctx: &mut ModelContext<Self>) {
+        augment_with_github_copilot_models(&mut update);
         let has_existing_persisted_config = get_cached_models(ctx).is_some();
 
         let old = std::mem::replace(&mut self.models_by_feature, update);
@@ -1009,7 +1075,7 @@ impl LLMPreferences {
     ///
     /// Called both when the model list is refreshed from the server and when
     /// BYOK API keys change (since `RequiresUpgrade` usability is BYOK-aware).
-    fn reconcile_disabled_model_preferences(&self, ctx: &mut ModelContext<Self>) {
+    pub(crate) fn reconcile_disabled_model_preferences(&self, ctx: &mut ModelContext<Self>) {
         let profiles_model = AIExecutionProfilesModel::handle(ctx);
         profiles_model.update(ctx, |profiles, ctx| {
             for profile_id in profiles.get_all_profile_ids() {

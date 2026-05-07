@@ -1,6 +1,18 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::{ai::agent::redaction, terminal::model::session::SessionType};
+use crate::{
+    ai::{
+        agent::{redaction, AIAgentInput},
+        github_copilot_client::{
+            ChatCompletionMessage, ChatCompletionRequest, GitHubCopilotClient,
+        },
+        llms::{github_copilot_model_name, is_github_copilot_model_id},
+    },
+    server::server_api::AIApiError,
+    terminal::model::session::SessionType,
+};
+use anyhow::anyhow;
+use chrono::Utc;
 use futures_util::StreamExt;
 use warp_core::features::FeatureFlag;
 use warp_multi_agent_api as api;
@@ -14,6 +26,11 @@ pub async fn generate_multi_agent_output(
     mut params: RequestParams,
     cancellation_rx: futures::channel::oneshot::Receiver<()>,
 ) -> Result<ResponseStream, ConvertToAPITypeError> {
+    #[cfg(not(target_family = "wasm"))]
+    if is_github_copilot_model_id(&params.model) {
+        return generate_github_copilot_output(params, cancellation_rx).await;
+    }
+
     let supported_tools = params
         .supported_tools_override
         .take()
@@ -148,6 +165,225 @@ pub async fn generate_multi_agent_output(
             Ok(Box::pin(rx))
         }
     }
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn generate_github_copilot_output(
+    params: RequestParams,
+    cancellation_rx: futures::channel::oneshot::Receiver<()>,
+) -> Result<ResponseStream, ConvertToAPITypeError> {
+    let (tx, rx) = async_channel::unbounded();
+    tokio::spawn(async move {
+        let result = generate_github_copilot_events(params).await;
+        match result {
+            Ok(events) => {
+                for event in events {
+                    if tx.send(Ok(event)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Err(err) => {
+                let _ = tx.send(Err(Arc::new(AIApiError::Other(err)))).await;
+            }
+        }
+    });
+
+    Ok(Box::pin(rx.take_until(cancellation_rx)))
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn generate_github_copilot_events(
+    params: RequestParams,
+) -> Result<Vec<api::ResponseEvent>, anyhow::Error> {
+    let model_name = github_copilot_model_name(&params.model)
+        .unwrap_or(GitHubCopilotClient::default_model())
+        .to_string();
+    let messages = chat_messages_from_request(&params);
+    if messages.is_empty() {
+        return Err(anyhow!("GitHub Copilot request has no chat messages"));
+    }
+
+    let client = GitHubCopilotClient::from_local_dev_storage_or_env()?;
+    let response = client
+        .chat_completion_with_request(&ChatCompletionRequest {
+            model: model_name.clone(),
+            messages,
+            temperature: None,
+            stream: Some(false),
+        })
+        .await?;
+    let content = response
+        .choices
+        .into_iter()
+        .find_map(|choice| choice.message.and_then(|message| message.content))
+        .unwrap_or_default();
+    if content.is_empty() {
+        return Err(anyhow!("GitHub Copilot returned an empty response"));
+    }
+
+    let conversation_id = params
+        .conversation_token
+        .as_ref()
+        .map(|token| token.as_str().to_string())
+        .unwrap_or_else(|| format!("github-copilot-{}", uuid::Uuid::new_v4()));
+    let request_id = format!("github-copilot-{}", uuid::Uuid::new_v4());
+    let existing_task_id = params
+        .tasks
+        .first()
+        .map(|task| task.id.clone())
+        .filter(|id| !id.is_empty());
+    let task_id =
+        existing_task_id.unwrap_or_else(|| format!("github-copilot-task-{}", uuid::Uuid::new_v4()));
+    let timestamp = prost_types::Timestamp {
+        seconds: Utc::now().timestamp(),
+        nanos: 0,
+    };
+
+    let output_message = api::Message {
+        id: uuid::Uuid::new_v4().to_string(),
+        task_id: task_id.clone(),
+        request_id: request_id.clone(),
+        timestamp: Some(timestamp.clone()),
+        server_message_data: String::new(),
+        citations: vec![],
+        message: Some(api::message::Message::AgentOutput(
+            api::message::AgentOutput { text: content },
+        )),
+    };
+    let model_used_message = api::Message {
+        id: uuid::Uuid::new_v4().to_string(),
+        task_id: task_id.clone(),
+        request_id: request_id.clone(),
+        timestamp: Some(timestamp),
+        server_message_data: String::new(),
+        citations: vec![],
+        message: Some(api::message::Message::ModelUsed(api::message::ModelUsed {
+            model_id: params.model.as_str().to_string(),
+            model_display_name: format!("{model_name} (GitHub Copilot)"),
+            is_fallback: false,
+        })),
+    };
+
+    let mut events = vec![api::ResponseEvent {
+        r#type: Some(api::response_event::Type::Init(
+            api::response_event::StreamInit {
+                conversation_id,
+                request_id,
+                run_id: String::new(),
+            },
+        )),
+    }];
+
+    if params.tasks.is_empty() {
+        events.push(api::ResponseEvent {
+            r#type: Some(api::response_event::Type::ClientActions(
+                api::response_event::ClientActions {
+                    actions: vec![api::ClientAction {
+                        action: Some(api::client_action::Action::CreateTask(
+                            api::client_action::CreateTask {
+                                task: Some(api::Task {
+                                    id: task_id.clone(),
+                                    description: String::new(),
+                                    dependencies: None,
+                                    messages: vec![],
+                                    summary: String::new(),
+                                    server_data: String::new(),
+                                }),
+                            },
+                        )),
+                    }],
+                },
+            )),
+        });
+    }
+
+    events.extend([
+        api::ResponseEvent {
+            r#type: Some(api::response_event::Type::ClientActions(
+                api::response_event::ClientActions {
+                    actions: vec![api::ClientAction {
+                        action: Some(api::client_action::Action::AddMessagesToTask(
+                            api::client_action::AddMessagesToTask {
+                                task_id,
+                                messages: vec![model_used_message, output_message],
+                            },
+                        )),
+                    }],
+                },
+            )),
+        },
+        api::ResponseEvent {
+            r#type: Some(api::response_event::Type::Finished(
+                api::response_event::StreamFinished {
+                    reason: Some(api::response_event::stream_finished::Reason::Done(
+                        api::response_event::stream_finished::Done {},
+                    )),
+                    token_usage: vec![],
+                    should_refresh_model_config: false,
+                    request_cost: None,
+                    conversation_usage_metadata: None,
+                },
+            )),
+        },
+    ]);
+
+    Ok(events)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn chat_messages_from_request(params: &RequestParams) -> Vec<ChatCompletionMessage> {
+    let mut messages = Vec::new();
+    messages.push(ChatCompletionMessage {
+        role: "system".to_string(),
+        content: "You are Warp's AI assistant running through GitHub Copilot. Answer directly and concisely. Do not claim access to Warp cloud tools.".to_string(),
+    });
+
+    for task in &params.tasks {
+        for message in &task.messages {
+            match &message.message {
+                Some(api::message::Message::UserQuery(query)) if !query.query.is_empty() => {
+                    messages.push(ChatCompletionMessage {
+                        role: "user".to_string(),
+                        content: query.query.clone(),
+                    });
+                }
+                Some(api::message::Message::AgentOutput(output)) if !output.text.is_empty() => {
+                    messages.push(ChatCompletionMessage {
+                        role: "assistant".to_string(),
+                        content: output.text.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for input in &params.input {
+        match input {
+            AIAgentInput::UserQuery { query, .. }
+            | AIAgentInput::AutoCodeDiffQuery { query, .. }
+            | AIAgentInput::CreateNewProject { query, .. }
+                if !query.is_empty() =>
+            {
+                messages.push(ChatCompletionMessage {
+                    role: "user".to_string(),
+                    content: query.clone(),
+                });
+            }
+            AIAgentInput::SummarizeConversation { prompt } => {
+                messages.push(ChatCompletionMessage {
+                    role: "user".to_string(),
+                    content: prompt
+                        .clone()
+                        .unwrap_or_else(|| "Summarize this conversation.".to_string()),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    messages
 }
 
 fn get_supported_tools(params: &RequestParams) -> Vec<api::ToolType> {

@@ -491,13 +491,11 @@ impl SearchItem for ModelSearchItem {
                 first.make_ascii_uppercase();
             }
 
-            // Show a BYOK option when the user's tier supports it and the provider
-            // is one that accepts user-supplied API keys.
-            let byok_available = UserWorkspaces::as_ref(app).is_byo_api_key_enabled()
-                && matches!(
-                    self.provider,
-                    LLMProvider::OpenAI | LLMProvider::Anthropic | LLMProvider::Google
-                );
+            // Show a BYOK option when the provider accepts user-supplied API keys.
+            let byok_available = matches!(
+                self.provider,
+                LLMProvider::OpenAI | LLMProvider::Anthropic | LLMProvider::Google
+            );
 
             let mut text_fragments = vec![
                 FormattedTextFragment::plain_text(format!(
