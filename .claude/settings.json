@@ -1,1 +1,43 @@
-{}
+{
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Edit(.agents/**)",
+      "Edit(app/**)",
+      "Edit(crates/**)",
+      "Edit(specs/**)",
+      "Edit(production/**)",
+      "Bash(cargo *)",
+      "Bash(git *)",
+      "Bash(./script/*)"
+    ],
+    "deny": [
+      "Edit(.env*)",
+      "Read(.env*)",
+      "Bash(curl *)",
+      "Bash(wget *)"
+    ]
+  },
+  "agents": {
+    "planner": ".agents/agents/planner.md",
+    "generator": ".agents/agents/generator.md",
+    "evaluator": ".agents/agents/evaluator.md",
+    "architect-lead": ".agents/agents/architect-lead.md",
+    "rust-core-dev": ".agents/agents/rust-core-dev.md",
+    "ui-dev": ".agents/agents/ui-dev.md",
+    "ai-agent-dev": ".agents/agents/ai-agent-dev.md",
+    "infra-dev": ".agents/agents/infra-dev.md"
+  },
+  "hooks": {
+    "pre-commit": [".agents/hooks/secret-detection.sh"],
+    "commit-msg": [".agents/hooks/validate-commit.sh"],
+    "session-start": [".agents/hooks/session-start.sh"],
+    "session-compact": [".agents/hooks/session-compact.sh"]
+  },
+  "rules": [
+    ".agents/rules/exhaustive-matching.md",
+    ".agents/rules/terminal-model-locking.md",
+    ".agents/rules/no-secrets.md",
+    ".agents/rules/ui-reuse.md"
+  ]
+}
