@@ -4,12 +4,9 @@
 # Usage:
 #   script/bundle --channel <channel> [--nosign] [--nouniversal] [--arch <arch>]
 #                 [--dmg-name-suffix <suffix>] [--read-passwords-from-env]
-#
-# When --nouniversal is passed (or no --arch given), cargo bundle runs without
-# a --target flag, so output lands at target/<profile>/bundle/osx/.
-# When --arch is specified (without --nouniversal), a cross-target build is
-# performed and the bundle lives under target/<triple>/<profile>/bundle/osx/.
 set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 CHANNEL=""
 NOSIGN=false
@@ -35,7 +32,7 @@ if [[ -z "$CHANNEL" ]]; then
     exit 1
 fi
 
-# Map channel → binary and app name (must match [package.metadata.bundle.bin.*] in Cargo.toml)
+# Map channel → binary and app name (must match [package.metadata.bundle.bin.*] in app/Cargo.toml)
 case "$CHANNEL" in
     oss)     BINARY="warp-oss";  APP_NAME="WarpOss"     ;;
     stable)  BINARY="stable";    APP_NAME="Warp"        ;;
@@ -51,45 +48,40 @@ esac
 PROFILE="release-lto"
 FEATURES="release_bundle"
 
-# Decide whether to pass --target to cargo bundle.
-#   --nouniversal  → build for host, output at target/<profile>/bundle/osx/
-#   --arch <name>  → cross-target build, output at target/<triple>/<profile>/bundle/osx/
-#   (default)      → same as --nouniversal
+# cargo bundle must be run from inside the package directory (it does not support --manifest-path).
+# The workspace target dir lives at REPO_ROOT/target/, so all output paths are anchored there.
 if $NOUNIVERSAL || [[ -z "$ARCH" ]]; then
-    # Host-native build; no --target so output goes to target/<profile>/bundle/osx/
     BUNDLE_TARGET_FLAG=""
-    BUNDLE_OUT_DIR="target/${PROFILE}/bundle/osx"
+    BUNDLE_OUT_DIR="${REPO_ROOT}/target/${PROFILE}/bundle/osx"
 elif [[ "$ARCH" == "universal" ]]; then
     BUNDLE_TARGET_FLAG="universal"
-    BUNDLE_OUT_DIR="target/${PROFILE}/bundle/osx"
+    BUNDLE_OUT_DIR="${REPO_ROOT}/target/${PROFILE}/bundle/osx"
 else
     case "$ARCH" in
-        arm64|aarch64)
-            TRIPLE="aarch64-apple-darwin"
-            ;;
-        x86_64)
-            TRIPLE="x86_64-apple-darwin"
-            ;;
+        arm64|aarch64) TRIPLE="aarch64-apple-darwin" ;;
+        x86_64)        TRIPLE="x86_64-apple-darwin"  ;;
         *)
             echo "Error: unknown arch '$ARCH'" >&2
             exit 1
             ;;
     esac
     BUNDLE_TARGET_FLAG="--target $TRIPLE"
-    BUNDLE_OUT_DIR="target/${TRIPLE}/${PROFILE}/bundle/osx"
+    BUNDLE_OUT_DIR="${REPO_ROOT}/target/${TRIPLE}/${PROFILE}/bundle/osx"
 fi
 
 echo "==> Building $APP_NAME (channel=$CHANNEL) | profile=$PROFILE | arch=${ARCH:-host}"
 
+# Switch into app/ so cargo bundle finds the [package] section.
+cd "${REPO_ROOT}/app"
+
 if [[ "${BUNDLE_TARGET_FLAG:-}" == "universal" ]]; then
-    # Build both architectures then lipo-merge into a universal .app
-    cargo bundle --manifest-path app/Cargo.toml --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
+    cargo bundle --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
         --target aarch64-apple-darwin
-    cargo bundle --manifest-path app/Cargo.toml --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
+    cargo bundle --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
         --target x86_64-apple-darwin
 
-    ARM_APP="target/aarch64-apple-darwin/${PROFILE}/bundle/osx/${APP_NAME}.app"
-    X86_APP="target/x86_64-apple-darwin/${PROFILE}/bundle/osx/${APP_NAME}.app"
+    ARM_APP="${REPO_ROOT}/target/aarch64-apple-darwin/${PROFILE}/bundle/osx/${APP_NAME}.app"
+    X86_APP="${REPO_ROOT}/target/x86_64-apple-darwin/${PROFILE}/bundle/osx/${APP_NAME}.app"
     UNI_APP="${BUNDLE_OUT_DIR}/${APP_NAME}.app"
 
     echo "==> Merging into universal binary with lipo"
@@ -101,9 +93,12 @@ if [[ "${BUNDLE_TARGET_FLAG:-}" == "universal" ]]; then
         "${X86_APP}/Contents/MacOS/${APP_NAME}"
 else
     # shellcheck disable=SC2086
-    cargo bundle --manifest-path app/Cargo.toml --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
+    cargo bundle --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
         ${BUNDLE_TARGET_FLAG}
 fi
+
+# Return to repo root for remaining steps
+cd "${REPO_ROOT}"
 
 APP_PATH="${BUNDLE_OUT_DIR}/${APP_NAME}.app"
 
