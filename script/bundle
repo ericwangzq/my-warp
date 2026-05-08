@@ -83,9 +83,9 @@ echo "==> Building $APP_NAME (channel=$CHANNEL) | profile=$PROFILE | arch=${ARCH
 
 if [[ "${BUNDLE_TARGET_FLAG:-}" == "universal" ]]; then
     # Build both architectures then lipo-merge into a universal .app
-    cargo bundle --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
+    cargo bundle --manifest-path app/Cargo.toml --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
         --target aarch64-apple-darwin
-    cargo bundle --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
+    cargo bundle --manifest-path app/Cargo.toml --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
         --target x86_64-apple-darwin
 
     ARM_APP="target/aarch64-apple-darwin/${PROFILE}/bundle/osx/${APP_NAME}.app"
@@ -101,7 +101,7 @@ if [[ "${BUNDLE_TARGET_FLAG:-}" == "universal" ]]; then
         "${X86_APP}/Contents/MacOS/${APP_NAME}"
 else
     # shellcheck disable=SC2086
-    cargo bundle --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
+    cargo bundle --manifest-path app/Cargo.toml --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
         ${BUNDLE_TARGET_FLAG}
 fi
 
