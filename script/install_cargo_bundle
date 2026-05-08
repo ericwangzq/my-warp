@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install cargo-bundle if not already available in PATH / cargo bin cache.
+if cargo bundle --version &>/dev/null 2>&1; then
+    echo "cargo-bundle already installed: $(cargo bundle --version)"
+    exit 0
+fi
+
+echo "Installing cargo-bundle..."
+cargo install cargo-bundle

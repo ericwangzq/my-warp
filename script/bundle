@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Build a Warp .app bundle and optionally package it as a DMG.
+#
+# Usage:
+#   script/bundle --channel <channel> [--nosign] [--nouniversal] [--arch <arch>]
+#                 [--dmg-name-suffix <suffix>] [--read-passwords-from-env]
+#
+# When --nouniversal is passed (or no --arch given), cargo bundle runs without
+# a --target flag, so output lands at target/<profile>/bundle/osx/.
+# When --arch is specified (without --nouniversal), a cross-target build is
+# performed and the bundle lives under target/<triple>/<profile>/bundle/osx/.
+set -euo pipefail
+
+CHANNEL=""
+NOSIGN=false
+NOUNIVERSAL=false
+ARCH=""
+DMG_NAME_SUFFIX=""
+READ_PASSWORDS_FROM_ENV=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --channel)           CHANNEL="$2";          shift 2 ;;
+        --nosign)            NOSIGN=true;            shift   ;;
+        --nouniversal)       NOUNIVERSAL=true;       shift   ;;
+        --arch)              ARCH="$2";              shift 2 ;;
+        --dmg-name-suffix)   DMG_NAME_SUFFIX="$2";  shift 2 ;;
+        --read-passwords-from-env) READ_PASSWORDS_FROM_ENV=true; shift ;;
+        *) echo "Unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
+if [[ -z "$CHANNEL" ]]; then
+    echo "Error: --channel is required" >&2
+    exit 1
+fi
+
+# Map channel → binary and app name (must match [package.metadata.bundle.bin.*] in Cargo.toml)
+case "$CHANNEL" in
+    oss)     BINARY="warp-oss";  APP_NAME="WarpOss"     ;;
+    stable)  BINARY="stable";    APP_NAME="Warp"        ;;
+    preview) BINARY="preview";   APP_NAME="WarpPreview" ;;
+    dev)     BINARY="dev";       APP_NAME="WarpDev"     ;;
+    local)   BINARY="warp";      APP_NAME="WarpLocal"   ;;
+    *)
+        echo "Error: unknown channel '$CHANNEL'" >&2
+        exit 1
+        ;;
+esac
+
+PROFILE="release-lto"
+FEATURES="release_bundle"
+
+# Decide whether to pass --target to cargo bundle.
+#   --nouniversal  → build for host, output at target/<profile>/bundle/osx/
+#   --arch <name>  → cross-target build, output at target/<triple>/<profile>/bundle/osx/
+#   (default)      → same as --nouniversal
+if $NOUNIVERSAL || [[ -z "$ARCH" ]]; then
+    # Host-native build; no --target so output goes to target/<profile>/bundle/osx/
+    BUNDLE_TARGET_FLAG=""
+    BUNDLE_OUT_DIR="target/${PROFILE}/bundle/osx"
+elif [[ "$ARCH" == "universal" ]]; then
+    BUNDLE_TARGET_FLAG="universal"
+    BUNDLE_OUT_DIR="target/${PROFILE}/bundle/osx"
+else
+    case "$ARCH" in
+        arm64|aarch64)
+            TRIPLE="aarch64-apple-darwin"
+            ;;
+        x86_64)
+            TRIPLE="x86_64-apple-darwin"
+            ;;
+        *)
+            echo "Error: unknown arch '$ARCH'" >&2
+            exit 1
+            ;;
+    esac
+    BUNDLE_TARGET_FLAG="--target $TRIPLE"
+    BUNDLE_OUT_DIR="target/${TRIPLE}/${PROFILE}/bundle/osx"
+fi
+
+echo "==> Building $APP_NAME (channel=$CHANNEL) | profile=$PROFILE | arch=${ARCH:-host}"
+
+if [[ "${BUNDLE_TARGET_FLAG:-}" == "universal" ]]; then
+    # Build both architectures then lipo-merge into a universal .app
+    cargo bundle --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
+        --target aarch64-apple-darwin
+    cargo bundle --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
+        --target x86_64-apple-darwin
+
+    ARM_APP="target/aarch64-apple-darwin/${PROFILE}/bundle/osx/${APP_NAME}.app"
+    X86_APP="target/x86_64-apple-darwin/${PROFILE}/bundle/osx/${APP_NAME}.app"
+    UNI_APP="${BUNDLE_OUT_DIR}/${APP_NAME}.app"
+
+    echo "==> Merging into universal binary with lipo"
+    mkdir -p "${UNI_APP}/Contents/MacOS"
+    cp -R "${ARM_APP}/." "${UNI_APP}/"
+    lipo -create -output \
+        "${UNI_APP}/Contents/MacOS/${APP_NAME}" \
+        "${ARM_APP}/Contents/MacOS/${APP_NAME}" \
+        "${X86_APP}/Contents/MacOS/${APP_NAME}"
+else
+    # shellcheck disable=SC2086
+    cargo bundle --profile "$PROFILE" --bin "$BINARY" --features "$FEATURES" \
+        ${BUNDLE_TARGET_FLAG}
+fi
+
+APP_PATH="${BUNDLE_OUT_DIR}/${APP_NAME}.app"
+
+# Code signing
+if ! $NOSIGN; then
+    echo "==> Signing $APP_PATH"
+    if $READ_PASSWORDS_FROM_ENV; then
+        KEYCHAIN_PATH="$HOME/Library/Keychains/warp-signing.keychain-db"
+        security create-keychain -p "$WARP_CODESIGN_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+        security unlock-keychain -p "$WARP_CODESIGN_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+        CERT_FILE="$(mktemp).p12"
+        echo "$WARP_DEVELOPER_ID_CERT" | base64 --decode > "$CERT_FILE"
+        security import "$CERT_FILE" -k "$KEYCHAIN_PATH" \
+            -P "$WARP_DEVELOPER_ID_CERT_PASSWORD" -T /usr/bin/codesign
+        security list-keychain -d user -s "$KEYCHAIN_PATH"
+        rm -f "$CERT_FILE"
+    fi
+
+    codesign --force --deep --sign "Developer ID Application" "$APP_PATH"
+fi
+
+# Package as DMG
+DMG_NAME="${APP_NAME}${DMG_NAME_SUFFIX}.dmg"
+DMG_PATH="${BUNDLE_OUT_DIR}/${DMG_NAME}"
+
+echo "==> Creating DMG: $DMG_PATH"
+create-dmg \
+    --volname "$APP_NAME" \
+    --window-pos 200 120 \
+    --window-size 800 400 \
+    --icon-size 100 \
+    --icon "${APP_NAME}.app" 200 190 \
+    --hide-extension "${APP_NAME}.app" \
+    --app-drop-link 600 185 \
+    "$DMG_PATH" \
+    "$APP_PATH"
+
+echo "==> Done: $DMG_PATH"
+
+# Expose DMG path for GitHub Actions
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    echo "dmg_path=${DMG_PATH}" >> "$GITHUB_OUTPUT"
+fi
