@@ -10,6 +10,7 @@ use crate::{
         auth_manager::{AuthManager, LoginGatedFeature},
         auth_state::AuthState,
         auth_view_modal::AuthViewVariant,
+        cloud_capabilities::local_loginless_mode,
         AuthStateProvider,
     },
     cloud_object::{
@@ -4879,6 +4880,11 @@ impl DriveIndex {
             return;
         };
 
+        if self.auth_state.is_local_loginless() {
+            log::info!("Object sharing is unavailable in local-loginless mode");
+            return;
+        }
+
         if self.auth_state.is_anonymous_or_logged_out() {
             AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
                 auth_manager.attempt_login_gated_feature(
@@ -5209,6 +5215,11 @@ impl TypedActionView for DriveIndex {
 
     fn handle_action(&mut self, action: &DriveIndexAction, ctx: &mut ViewContext<Self>) {
         // Block anonymous users from performing team actions
+        if local_loginless_mode(ctx) && action.blocked_for_anonymous_user() {
+            log::info!("Team/share action is unavailable without official Warp cloud capability");
+            return;
+        }
+
         if self.auth_state.is_anonymous_or_logged_out() && action.blocked_for_anonymous_user() {
             AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
                 auth_manager.attempt_login_gated_feature(

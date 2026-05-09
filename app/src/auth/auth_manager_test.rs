@@ -18,6 +18,12 @@ fn initialize_app(app: &mut App) {
     app.add_singleton_model(AuthManager::new_for_test);
 }
 
+fn initialize_local_loginless_app(app: &mut App) {
+    app.add_singleton_model(|_ctx| ServerApiProvider::new_for_test());
+    app.add_singleton_model(|_| AuthStateProvider::new_local_loginless_for_test());
+    app.add_singleton_model(AuthManager::new_for_test);
+}
+
 /// Subscribes to `AuthManager` events and returns a flag that becomes `true`
 /// if an `AuthFailed(InvalidStateParameter)` event is observed.
 fn track_invalid_state_failures(app: &mut App) -> Arc<AtomicBool> {
@@ -246,5 +252,62 @@ fn test_persist_skips_when_api_key_authenticated() {
         AuthManager::handle(&app).update(&mut app, |auth_manager, ctx| {
             auth_manager.persist(ctx);
         });
+    });
+}
+
+#[test]
+fn test_local_loginless_create_anonymous_user_skips_login_without_server_call() {
+    App::test((), |mut app| async move {
+        initialize_local_loginless_app(&mut app);
+
+        let saw_skipped_login = Arc::new(AtomicBool::new(false));
+        let saw_skipped_login_for_closure = saw_skipped_login.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&AuthManager::handle(ctx), move |_, event, _| {
+                if matches!(event, AuthManagerEvent::SkippedLogin) {
+                    saw_skipped_login_for_closure.store(true, Ordering::Relaxed);
+                }
+            });
+        });
+
+        AuthManager::handle(&app).update(&mut app, |auth_manager, ctx| {
+            auth_manager.create_anonymous_user(None, ctx);
+        });
+
+        assert!(
+            saw_skipped_login.load(Ordering::Relaxed),
+            "local-loginless mode should skip Firebase anonymous user creation"
+        );
+    });
+}
+
+#[test]
+fn test_local_loginless_login_gated_feature_does_not_prompt_for_login() {
+    App::test((), |mut app| async move {
+        initialize_local_loginless_app(&mut app);
+
+        let saw_login_prompt = Arc::new(AtomicBool::new(false));
+        let saw_login_prompt_for_closure = saw_login_prompt.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&AuthManager::handle(ctx), move |_, event, _| {
+                if matches!(event, AuthManagerEvent::AttemptedLoginGatedFeature { .. }) {
+                    saw_login_prompt_for_closure.store(true, Ordering::Relaxed);
+                }
+            });
+        });
+
+        AuthManager::handle(&app).update(&mut app, |auth_manager, ctx| {
+            auth_manager.attempt_login_gated_feature(
+                "Share Object",
+                crate::auth::auth_view_modal::AuthViewVariant::RequireLoginCloseable,
+                ctx,
+            );
+            auth_manager.anonymous_user_hit_drive_object_limit(ctx);
+        });
+
+        assert!(
+            !saw_login_prompt.load(Ordering::Relaxed),
+            "local-loginless mode should not route official gated features into login UI"
+        );
     });
 }

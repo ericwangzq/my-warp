@@ -8384,6 +8384,15 @@ impl Workspace {
             MenuItem::Separator,
         ]);
 
+        if self.auth_state.is_local_loginless() {
+            items.push(
+                MenuItemFields::new("Local mode")
+                    .with_disabled(true)
+                    .into_item(),
+            );
+            return items;
+        }
+
         if self.auth_state.is_anonymous_or_logged_out() {
             items.push(
                 MenuItemFields::new("Sign up")
@@ -15006,7 +15015,8 @@ impl Workspace {
         if self.is_readonly_shared_session_active(ctx) {
             return;
         }
-        if self.auth_state.is_anonymous_or_logged_out()
+        if !self.auth_state.is_local_loginless()
+            && self.auth_state.is_anonymous_or_logged_out()
             && workflow.as_workflow().is_agent_mode_workflow()
         {
             AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {
@@ -18736,7 +18746,10 @@ impl Workspace {
     }
 
     fn render_reauth_banner_element(&self) -> Option<WorkspaceBannerFields> {
-        if self.reauth_banner_dismissed || !self.auth_state.needs_reauth() {
+        if self.auth_state.is_local_loginless()
+            || self.reauth_banner_dismissed
+            || !self.auth_state.needs_reauth()
+        {
             return None;
         }
 
@@ -20097,6 +20110,19 @@ impl TypedActionView for Workspace {
     fn handle_action(&mut self, action: &Self::Action, ctx: &mut ViewContext<Self>) {
         use WorkspaceAction::*;
         let window_id = ctx.window_id();
+
+        if self.auth_state.is_local_loginless() && action.blocked_for_anonymous_user() {
+            self.toast_stack.update(ctx, |toast_stack, ctx| {
+                toast_stack.add_ephemeral_toast(
+                    DismissibleToast::default(
+                        "This action requires Warp-hosted services and is unavailable in this build."
+                            .to_string(),
+                    ),
+                    ctx,
+                );
+            });
+            return;
+        }
 
         if self.auth_state.is_anonymous_or_logged_out() && action.blocked_for_anonymous_user() {
             AuthManager::handle(ctx).update(ctx, |auth_manager, ctx| {

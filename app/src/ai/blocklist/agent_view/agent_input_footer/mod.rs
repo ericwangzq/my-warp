@@ -15,7 +15,10 @@ use crate::{
         AIRequestUsageModel,
     },
     appearance::Appearance,
-    auth::{AuthManager, AuthStateProvider},
+    auth::{
+        cloud_capabilities::{local_loginless_mode, official_warp_cloud_enabled},
+        AuthManager, AuthStateProvider,
+    },
     completer::SessionContext,
     context_chips::{
         self,
@@ -131,6 +134,8 @@ const FAST_FORWARD_OFF_TOOLTIP: &str = "Auto-approve all agent actions for this 
 
 const START_REMOTE_CONTROL_TOOLTIP: &str = "Start remote control";
 const START_REMOTE_CONTROL_LOGIN_REQUIRED_TOOLTIP: &str = "Log in to use /remote-control";
+const START_REMOTE_CONTROL_LOCAL_UNAVAILABLE_TOOLTIP: &str =
+    "/remote-control requires Warp-hosted sharing services and is unavailable in this build";
 
 const CLOUD_MODE_V2_FOOTER_GAP: f32 = 4.;
 
@@ -1866,16 +1871,20 @@ impl AgentInputFooter {
     /// user is anonymous or logged out, since session sharing requires a
     /// real account.
     fn sync_remote_control_button(&self, ctx: &mut ViewContext<Self>) {
+        let local_unavailable = local_loginless_mode(ctx);
         let login_required = AuthStateProvider::as_ref(ctx)
             .get()
             .is_anonymous_or_logged_out();
-        let tooltip = if login_required {
+        let disabled = !official_warp_cloud_enabled(ctx);
+        let tooltip = if local_unavailable {
+            START_REMOTE_CONTROL_LOCAL_UNAVAILABLE_TOOLTIP
+        } else if login_required {
             START_REMOTE_CONTROL_LOGIN_REQUIRED_TOOLTIP
         } else {
             START_REMOTE_CONTROL_TOOLTIP
         };
         self.start_remote_control_button.update(ctx, |button, ctx| {
-            button.set_disabled(login_required, ctx);
+            button.set_disabled(disabled, ctx);
             button.set_tooltip(Some(tooltip), ctx);
         });
     }

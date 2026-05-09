@@ -68,3 +68,41 @@ pub(super) fn maybe_register_app_as_login_item(ctx: &mut AppContext) {
         );
     });
 }
+
+#[allow(deprecated)]
+pub(super) fn unregister_app_as_login_item(ctx: &mut AppContext) {
+    GeneralSettings::handle(ctx).update(ctx, |settings, ctx| {
+        report_if_error!(settings.app_added_as_login_item.set_value(false, ctx));
+        ctx.spawn(
+            async move {
+                unsafe {
+                    use cocoa::base::{id, nil};
+                    use objc::runtime::{Class, Object};
+                    use objc::{class, msg_send, sel, sel_impl};
+
+                    let bundle: id = msg_send![class!(NSBundle), mainBundle];
+                    if bundle == nil {
+                        log::debug!("Not running in a bundle, so not unregistering login item");
+                        return false;
+                    }
+
+                    if let Some(sm_app_service_class) = Class::get("SMAppService") {
+                        let app_service: id = msg_send![sm_app_service_class, mainAppService];
+                        let mut error: *mut Object = std::ptr::null_mut();
+                        let result: bool =
+                            msg_send![app_service, unregisterAndReturnError:&mut error];
+                        if !result && !error.is_null() {
+                            log::warn!("Failed to unregister app as login item.");
+                        }
+                    }
+                }
+                false
+            },
+            |settings, app_added_as_login_item, ctx| {
+                report_if_error!(settings
+                    .app_added_as_login_item
+                    .set_value(app_added_as_login_item, ctx));
+            },
+        );
+    });
+}

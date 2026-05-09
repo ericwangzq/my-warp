@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use indexmap::IndexMap;
 
 use crate::ai::request_usage_model::RequestLimitInfo;
-use crate::auth::AuthStateProvider;
+use crate::auth::{cloud_capabilities::local_loginless_mode, AuthStateProvider};
 use crate::report_if_error;
 use crate::terminal::CLIAgent;
 use crate::workspaces::user_workspaces::UserWorkspaces;
@@ -1497,7 +1497,8 @@ impl AISettings {
     }
 
     pub fn is_any_ai_enabled(&self, app: &AppContext) -> bool {
-        // Disable AI for anonymous and logged-out users.
+        // Disable Warp-hosted AI for anonymous/logged-out official-account users, but keep
+        // local-loginless builds and locally authenticated provider flows available.
         let is_anonymous_or_logged_out = AuthStateProvider::as_ref(app)
             .get()
             .is_anonymous_or_logged_out();
@@ -1508,7 +1509,9 @@ impl AISettings {
         let has_local_github_copilot_oauth = false;
 
         *self.is_any_ai_enabled
-            && (!is_anonymous_or_logged_out || has_local_github_copilot_oauth)
+            && (local_loginless_mode(app)
+                || !is_anonymous_or_logged_out
+                || has_local_github_copilot_oauth)
             && !self.is_ai_disabled_due_to_remote_session_org_policy(app)
     }
 

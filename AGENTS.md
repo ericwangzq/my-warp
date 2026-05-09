@@ -30,6 +30,7 @@ cargo clippy --workspace --all-targets --all-features --tests -- -D warnings  # 
 - **Unused params**: Remove completely, do not prefix with `_`.
 - **Inline format args**: Use `eprintln!("{message}")` not `eprintln!("{}", message)`.
 - **Preserve comments**: Do not remove existing comments when making unrelated changes.
+- **Local loginless boundary**: This fork's local-loginless work must not fake or bypass Warp official backend account, billing, team, cloud, sharing, or entitlement checks. See `.agents/rules/local-loginless-boundary.md`.
 
 ### Feature Flags
 
@@ -55,6 +56,16 @@ specs/<ticket-number>/TECH.md      # Implementation plan
 ```
 
 See `.agents/skills/spec-driven-implementation/SKILL.md` for the full workflow.
+
+### Active Specs
+
+Current cross-agent work:
+
+- `specs/local-loginless-mode/PRODUCT.md` — desired user-facing behavior for making this fork usable without Warp official account login.
+- `specs/local-loginless-mode/TECH.md` — architecture and implementation plan for local-loginless mode.
+- `specs/local-loginless-mode/PLANNER_HANDOFF.md` — planner handoff with code surfaces, sprint contract, risks, and specialist split.
+
+Any agent implementing, reviewing, or evaluating auth/account/cloud changes must read these files first and keep them current when behavior or architecture changes.
 
 ## Agent Architecture (Fusion)
 

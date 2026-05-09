@@ -19,6 +19,7 @@ use crate::ai::mcp::TemplatableMCPServerManager;
 use crate::ai::paths::host_native_absolute_path;
 use crate::auth::auth_manager::{AuthManager, LoginGatedFeature};
 use crate::auth::auth_view_modal::AuthViewVariant;
+use crate::auth::cloud_capabilities::local_loginless_mode;
 use crate::auth::AuthStateProvider;
 use crate::cloud_object::model::persistence::{CloudModel, CloudModelEvent};
 use crate::cloud_object::GenericStringObjectFormat::Json;
@@ -3402,9 +3403,10 @@ impl SettingsWidget for GlobalAIWidget {
         let is_ai_disabled_due_to_remote_session_org_policy =
             AISettings::as_ref(app).is_ai_disabled_due_to_remote_session_org_policy(app);
 
-        let is_anonymous = AuthStateProvider::as_ref(app)
-            .get()
-            .is_anonymous_or_logged_out();
+        let is_anonymous = !local_loginless_mode(app)
+            && AuthStateProvider::as_ref(app)
+                .get()
+                .is_anonymous_or_logged_out();
 
         let mut row = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
@@ -3776,9 +3778,10 @@ impl SettingsWidget for UsageWidget {
         )
         .with_hyperlink_font_color(appearance.theme().accent().into_solid());
 
-        if AuthStateProvider::as_ref(app)
-            .get()
-            .is_anonymous_or_logged_out()
+        if !local_loginless_mode(app)
+            && AuthStateProvider::as_ref(app)
+                .get()
+                .is_anonymous_or_logged_out()
         {
             upgrade_cta = upgrade_cta.register_default_click_handlers(|_, ctx, _| {
                 ctx.dispatch_typed_action(AISettingsPageAction::AttemptLoginGatedUpgrade);

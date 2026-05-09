@@ -144,6 +144,11 @@ impl AuthManager {
         enforce_state_validation: bool,
         ctx: &mut ModelContext<Self>,
     ) {
+        if self.auth_state.is_local_loginless() {
+            log::info!("Ignoring official auth redirect in local-loginless mode");
+            return;
+        }
+
         let AuthRedirectPayload {
             refresh_token,
             user_uid,
@@ -211,6 +216,11 @@ impl AuthManager {
         auth_payload: AuthRedirectPayload,
         ctx: &mut ModelContext<Self>,
     ) {
+        if self.auth_state.is_local_loginless() {
+            log::info!("Ignoring interrupted official auth payload in local-loginless mode");
+            return;
+        }
+
         let AuthRedirectPayload {
             refresh_token,
             user_uid: _,
@@ -248,6 +258,11 @@ impl AuthManager {
 
     /// Refreshes the user's auth state using their existing credentials.
     pub fn refresh_user(&self, ctx: &mut ModelContext<Self>) {
+        if self.auth_state.is_local_loginless() {
+            log::info!("Skipping official user refresh in local-loginless mode");
+            return;
+        }
+
         let Some(credentials) = self.auth_state.credentials() else {
             log::warn!("Attempted to refresh user without credentials");
             return;
@@ -270,6 +285,11 @@ impl AuthManager {
     /// This is only used by the Warp CLI if running on a device that does not have the Warp app installed.
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     pub fn authorize_device(&self, ctx: &mut ModelContext<Self>) {
+        if self.auth_state.is_local_loginless() {
+            log::info!("Skipping device authorization in local-loginless mode");
+            return;
+        }
+
         // Clear any stale user state so old credentials don't interfere
         // with the fresh device auth flow.
         self.auth_state.set_credentials(None);
@@ -575,6 +595,12 @@ impl AuthManager {
         referral_code: Option<String>,
         ctx: &mut ModelContext<Self>,
     ) {
+        if self.auth_state.is_local_loginless() {
+            log::info!("Skipping Firebase anonymous user creation in local-loginless mode");
+            ctx.emit(AuthManagerEvent::SkippedLogin);
+            return;
+        }
+
         let anonymous_user_type = AnonymousUserType::NativeClientAnonymousUserFeatureGated;
 
         let auth_client = self.auth_client.clone();
@@ -638,6 +664,11 @@ impl AuthManager {
         auth_view_variant: AuthViewVariant,
         ctx: &mut ModelContext<Self>,
     ) {
+        if self.auth_state.is_local_loginless() {
+            log::info!("Ignoring official login-gated feature '{feature}' in local-loginless mode");
+            return;
+        }
+
         if self.auth_state.is_anonymous_or_logged_out() {
             send_telemetry_from_ctx!(
                 TelemetryEvent::AnonymousUserAttemptLoginGatedFeature { feature },
@@ -648,6 +679,11 @@ impl AuthManager {
     }
 
     pub fn anonymous_user_hit_drive_object_limit(&self, ctx: &mut ModelContext<Self>) {
+        if self.auth_state.is_local_loginless() {
+            log::info!("Ignoring anonymous drive object limit in local-loginless mode");
+            return;
+        }
+
         if self.auth_state.is_anonymous_or_logged_out() {
             send_telemetry_from_ctx!(TelemetryEvent::AnonymousUserHitCloudObjectLimit, ctx);
             ctx.emit(AuthManagerEvent::AttemptedLoginGatedFeature {
@@ -661,6 +697,11 @@ impl AuthManager {
         entrypoint: AnonymousUserSignupEntrypoint,
         ctx: &mut ModelContext<Self>,
     ) {
+        if self.auth_state.is_local_loginless() {
+            log::info!("Skipping anonymous user linking in local-loginless mode");
+            return;
+        }
+
         let auth_client = self.auth_client.clone();
         let _ = ctx.spawn(
             async move { auth_client.fetch_new_custom_token().await },
@@ -858,6 +899,11 @@ impl AuthManager {
     /// 1. Updates the server by calling set_user_is_onboarded
     /// 2. Updates the local auth state and persists the user data
     pub fn set_user_onboarded(&self, ctx: &mut ModelContext<Self>) {
+        if self.auth_state.is_local_loginless() {
+            self.auth_state.set_is_onboarded(true);
+            return;
+        }
+
         // Update server
         let auth_client = self.auth_client.clone();
         let _ = ctx.spawn(

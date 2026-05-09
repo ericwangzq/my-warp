@@ -1685,7 +1685,9 @@ impl RootView {
                     let should_show_pre_login_onboarding = FeatureFlag::OpenWarpNewSettingsModes.is_enabled()
                         && FeatureFlag::AgentOnboarding.is_enabled()
                         && !has_completed_local_onboarding;
-                    if FeatureFlag::ForceLogin.is_enabled() {
+                    if FeatureFlag::LocalLoginlessMode.is_enabled() {
+                        AuthOnboardingState::Terminal(workspace_args.create_workspace(ctx))
+                    } else if FeatureFlag::ForceLogin.is_enabled() {
                         // ForceLogin is true for Preview
                         AuthOnboardingState::Auth(workspace_args.into())
                     } else if should_show_pre_login_onboarding {
