@@ -7,7 +7,10 @@ use anyhow::anyhow;
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
 use uuid::Uuid;
-use warp_core::channel::{Channel, ChannelState};
+use warp_core::{
+    channel::{Channel, ChannelState},
+    features::FeatureFlag,
+};
 use warp_graphql::object_permissions::OwnerType;
 use warpui::{AppContext, Entity, SingletonEntity};
 
@@ -36,9 +39,17 @@ pub(super) enum PersistAction {
     DoNothing,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthIdentityMode {
+    Official,
+    LocalLoginless,
+}
+
 /// AuthState holds information about the currently-logged in user.
 /// If you need to access AuthState, you can use the AuthStateProvider singleton model.
 pub struct AuthState {
+    identity_mode: AuthIdentityMode,
+
     /// The currently logged-in User. None if the user isn't logged in currently.
     user: RwLock<Option<User>>,
 
@@ -56,8 +67,30 @@ pub struct AuthState {
 impl AuthState {
     fn new(ctx: &AppContext) -> Self {
         Self {
+            identity_mode: AuthIdentityMode::Official,
             user: RwLock::new(None),
             anonymous_id: get_or_create_anonymous_id(ctx),
+            needs_reauth: AtomicBool::new(false),
+            credentials: RwLock::new(None),
+        }
+    }
+
+    fn new_local_loginless(ctx: &AppContext) -> Self {
+        Self {
+            identity_mode: AuthIdentityMode::LocalLoginless,
+            user: RwLock::new(None),
+            anonymous_id: get_or_create_anonymous_id(ctx),
+            needs_reauth: AtomicBool::new(false),
+            credentials: RwLock::new(None),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_local_loginless_for_test() -> Self {
+        Self {
+            identity_mode: AuthIdentityMode::LocalLoginless,
+            user: RwLock::new(None),
+            anonymous_id: Uuid::new_v4(),
             needs_reauth: AtomicBool::new(false),
             credentials: RwLock::new(None),
         }
@@ -66,6 +99,7 @@ impl AuthState {
     #[cfg(any(test, feature = "integration_tests"))]
     pub fn new_for_test() -> Self {
         Self {
+            identity_mode: AuthIdentityMode::Official,
             user: RwLock::new(Some(User::test())),
             anonymous_id: Uuid::new_v4(),
             needs_reauth: AtomicBool::new(false),
@@ -74,12 +108,18 @@ impl AuthState {
     }
 
     /// Creates and initializes auth state. Checks, in order:
-    /// 1. Test user (test/integration/skip_login builds)
-    /// 2. Provided API key
-    /// 3. WARP_USER_SECRET environment variable
-    /// 4. Persisted user from secure storage
+    /// 1. Local-loginless mode when enabled and no API key is provided
+    /// 2. Test user (test/integration/skip_login builds)
+    /// 3. Provided API key
+    /// 4. WARP_USER_SECRET environment variable
+    /// 5. Persisted user from secure storage
     #[cfg_attr(target_family = "wasm", allow(dead_code))]
     pub fn initialize(ctx: &AppContext, api_key: Option<String>) -> Self {
+        if FeatureFlag::LocalLoginlessMode.is_enabled() && api_key.is_none() {
+            log::info!("Starting in local-loginless mode");
+            return Self::new_local_loginless(ctx);
+        }
+
         let state = Self::new(ctx);
 
         if Self::should_use_test_user() {
@@ -231,6 +271,20 @@ impl AuthState {
     /// Determines whether the user should be considered as logged in.
     pub fn is_logged_in(&self) -> bool {
         self.credentials.read().is_some()
+    }
+
+    pub fn is_local_loginless(&self) -> bool {
+        self.identity_mode == AuthIdentityMode::LocalLoginless
+    }
+
+    pub fn has_official_account(&self) -> bool {
+        !self.is_local_loginless()
+            && self.is_logged_in()
+            && !self.is_user_anonymous().unwrap_or(true)
+    }
+
+    pub fn is_local_workspace_available(&self) -> bool {
+        self.is_local_loginless() || self.is_logged_in()
     }
 
     /// Returns whether the user should be treated as not having a full account.
@@ -498,11 +552,19 @@ impl AuthStateProvider {
     pub fn new_logged_out_for_test() -> Self {
         Self {
             auth_state: Arc::new(AuthState {
+                identity_mode: AuthIdentityMode::Official,
                 user: RwLock::new(None),
                 anonymous_id: Uuid::new_v4(),
                 needs_reauth: AtomicBool::new(false),
                 credentials: RwLock::new(None),
             }),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_local_loginless_for_test() -> Self {
+        Self {
+            auth_state: Arc::new(AuthState::new_local_loginless_for_test()),
         }
     }
 
@@ -516,3 +578,52 @@ impl Entity for AuthStateProvider {
 }
 
 impl SingletonEntity for AuthStateProvider {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::settings::initialize_settings_for_tests;
+    use warpui::App;
+
+    #[test]
+    fn initialize_uses_local_loginless_state_when_flag_enabled() {
+        App::test((), |mut app| async move {
+            let _guard = FeatureFlag::LocalLoginlessMode.override_enabled(true);
+            initialize_settings_for_tests(&mut app);
+
+            app.update(|ctx| {
+                let state = AuthState::initialize(ctx, None);
+
+                assert!(state.is_local_loginless());
+                assert!(!state.is_logged_in());
+                assert!(!state.has_official_account());
+                assert!(state.is_local_workspace_available());
+                assert!(state.credentials().is_none());
+                assert_eq!(state.user_id(), None);
+            });
+        });
+    }
+
+    #[test]
+    fn local_loginless_state_has_no_official_credentials() {
+        let state = AuthState::new_local_loginless_for_test();
+
+        assert!(state.is_local_loginless());
+        assert!(!state.is_logged_in());
+        assert!(!state.has_official_account());
+        assert!(state.is_local_workspace_available());
+        assert_eq!(state.user_id(), None);
+        assert!(state.credentials().is_none());
+        assert_eq!(state.is_user_anonymous(), None);
+        assert_eq!(state.is_anonymous_user_feature_gated(), None);
+    }
+
+    #[test]
+    fn official_test_state_is_not_local_loginless() {
+        let state = AuthState::new_for_test();
+
+        assert!(!state.is_local_loginless());
+        assert!(state.is_logged_in());
+        assert!(state.has_official_account());
+    }
+}

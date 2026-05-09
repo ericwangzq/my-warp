@@ -800,6 +800,11 @@ pub enum FeatureFlag {
     /// login-gated features are disabled until they sign in.
     SkipFirebaseAnonymousUser,
 
+    /// Enables this fork's local-loginless mode. Local app functionality is
+    /// available without a Warp official backend account, while official
+    /// cloud/account surfaces are disabled instead of prompting for login.
+    LocalLoginlessMode,
+
     /// Enables tab configs — user-definable TOML templates for launching custom tab layouts.
     TabConfigs,
 

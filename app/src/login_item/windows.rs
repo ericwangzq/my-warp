@@ -71,6 +71,25 @@ pub(super) fn maybe_register_app_as_login_item(ctx: &mut AppContext) {
     });
 }
 
+pub(super) fn unregister_app_as_login_item(ctx: &mut AppContext) {
+    GeneralSettings::handle(ctx).update(ctx, |settings, ctx| {
+        let value_name = login_item_value_name();
+        ctx.spawn(
+            async move {
+                if let Err(err) = unregister(&value_name) {
+                    log::warn!("Failed to unregister Warp as a login item: {err}");
+                }
+                false
+            },
+            |settings, app_added_as_login_item, ctx| {
+                report_if_error!(settings
+                    .app_added_as_login_item
+                    .set_value(app_added_as_login_item, ctx));
+            },
+        );
+    });
+}
+
 fn current_exe_path() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()

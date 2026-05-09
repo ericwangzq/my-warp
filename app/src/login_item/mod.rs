@@ -12,7 +12,10 @@ mod macos;
 mod windows;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use warp_core::channel::ChannelState;
+use warp_core::{
+    channel::{Channel, ChannelState},
+    features::FeatureFlag,
+};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use warpui::AppContext;
 
@@ -36,6 +39,14 @@ pub fn maybe_register_app_as_login_item(ctx: &mut AppContext) {
     }
     if !ChannelState::is_release_bundle() {
         log::debug!("Not a release bundle, skipping login-item registration");
+        return;
+    }
+    if ChannelState::channel() == Channel::Local || FeatureFlag::LocalLoginlessMode.is_enabled() {
+        log::debug!("Local-loginless build, unregistering and skipping login-item registration");
+        #[cfg(target_os = "macos")]
+        macos::unregister_app_as_login_item(ctx);
+        #[cfg(target_os = "windows")]
+        windows::unregister_app_as_login_item(ctx);
         return;
     }
     #[cfg(target_os = "macos")]

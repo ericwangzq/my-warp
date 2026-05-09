@@ -18,6 +18,7 @@ use crate::ai::llms::LLMId;
 use crate::ai::restored_conversations::RestoredAgentConversations;
 use crate::auth::auth_manager::AuthManager;
 use crate::auth::auth_view_modal::AuthViewVariant;
+use crate::auth::cloud_capabilities::{local_loginless_mode, official_warp_cloud_enabled};
 use crate::auth::AuthStateProvider;
 use crate::cloud_object::Space;
 #[cfg(feature = "local_fs")]
@@ -2459,6 +2460,15 @@ impl PaneGroup {
             log::warn!("Tried to open share session modal for non-existent terminal pane");
             return;
         };
+
+        if local_loginless_mode(ctx) {
+            ctx.emit(Event::ShowToast {
+                message: "Session sharing requires Warp-hosted sharing services and is unavailable in this build.".to_string(),
+                flavor: ToastFlavor::Default,
+                pane_id: Some(terminal_pane_id.into()),
+            });
+            return;
+        }
 
         if AuthStateProvider::as_ref(ctx)
             .get()
@@ -6904,7 +6914,19 @@ impl PaneGroup {
 
     /// Add and focus a cloud mode pane.
     pub fn add_ambient_agent_pane(&mut self, ctx: &mut ViewContext<Self>) {
-        if !FeatureFlag::AgentView.is_enabled() || !FeatureFlag::CloudMode.is_enabled() {
+        if !FeatureFlag::AgentView.is_enabled()
+            || !FeatureFlag::CloudMode.is_enabled()
+            || !official_warp_cloud_enabled(ctx)
+        {
+            if local_loginless_mode(ctx) {
+                ctx.emit(Event::ShowToast {
+                    message:
+                        "Cloud mode requires Warp-hosted services and is unavailable in this build."
+                            .to_string(),
+                    flavor: ToastFlavor::Default,
+                    pane_id: None,
+                });
+            }
             return;
         }
 
