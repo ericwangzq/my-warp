@@ -2,6 +2,8 @@
 
 Agent-agnostic entry point for AI coding assistants working in this repository.
 
+我的工作语言是中文，交流和任务交付优先使用中文。
+
 ## Project Overview
 
 Rust-based terminal emulator with a custom UI framework (WarpUI). Cargo workspace with 60+ crates. Main binary in `app/`, UI framework in `crates/warpui/`. Cross-platform: macOS, Windows, Linux, WASM.
