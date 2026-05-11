@@ -18,8 +18,12 @@ on:
     - cron: '0 12 * * *' # 8am EST
   workflow_dispatch:
 
+env:
+  RUN_CLOSE_STALE_HERE: ${{ github.repository == 'warpdotdev/warp' || github.repository == 'ericwangzq/my-warp' }}
+
 jobs:
   close-stale-fix-prs:
+    if: env.RUN_CLOSE_STALE_HERE == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Close Stale Fix PRs

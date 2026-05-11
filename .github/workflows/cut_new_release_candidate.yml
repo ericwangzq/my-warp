@@ -12,6 +12,7 @@ on:
 jobs:
   compute_channel:
     name: Compute release channel
+    if: github.repository == 'warpdotdev/warp'
     runs-on: ubuntu-latest
     outputs:
       channel: ${{ steps.compute-channel.outputs.channel }}

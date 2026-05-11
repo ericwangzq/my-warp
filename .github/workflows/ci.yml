@@ -53,8 +53,10 @@ jobs:
     outputs:
       affects-database-schema: ${{ github.ref == 'master' || steps.filter.outputs.affects-database-schema }}
       affects-rust-sources: ${{ github.ref == 'master' || steps.filter.outputs.affects-rust-sources }}
-      macos-runner: ${{ steps.mac_runner_type.outputs.value }}
-      wasm-runner: ${{ steps.wasm_runner_type.outputs.value }}
+      macos-runner: ${{ steps.ci_runners.outputs.macos }}
+      wasm-runner: ${{ steps.ci_runners.outputs.wasm }}
+      linux-runner: ${{ steps.ci_runners.outputs.linux }}
+      windows-runner: ${{ steps.ci_runners.outputs.windows }}
     steps:
       - name: Checkout sources
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -70,19 +72,23 @@ jobs:
             affects-rust-sources:
               - '**.rs'
 
-      - name: Determine macOS runner type
-        id: mac_runner_type
+      # Upstream uses paid/partner runners (Namespace, larger GitHub runners). Forks
+      # fall back to default GitHub-hosted labels so jobs are schedulable without org infra.
+      - name: Determine CI runner labels
+        id: ci_runners
+        shell: bash
         run: |
-          RUNNER_TYPE='["namespace-profile-mac-ci"]'
-          echo "value=$RUNNER_TYPE" >> $GITHUB_OUTPUT
-
-      - name: Determine wasm runner type
-        id: wasm_runner_type
-        run: |
-          # Use a larger (16 core, 64GB ram) runner on Linux to speed up execution time.
-          # https://github.com/warpdotdev/warp-internal/settings/actions/runners
-          RUNNER_TYPE='["ubuntu-latest-large"]'
-          echo "value=$RUNNER_TYPE" >> $GITHUB_OUTPUT
+          if [[ "${{ github.repository }}" == "warpdotdev/warp" ]]; then
+            echo 'macos=["namespace-profile-mac-ci"]' >> "$GITHUB_OUTPUT"
+            echo 'wasm=["ubuntu-latest-large"]' >> "$GITHUB_OUTPUT"
+            echo "linux=ubuntu-latest-large" >> "$GITHUB_OUTPUT"
+            echo "windows=windows-latest-large" >> "$GITHUB_OUTPUT"
+          else
+            echo 'macos=["macos-latest"]' >> "$GITHUB_OUTPUT"
+            echo 'wasm=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+            echo "linux=ubuntu-latest" >> "$GITHUB_OUTPUT"
+            echo "windows=windows-latest" >> "$GITHUB_OUTPUT"
+          fi
 
   tests:
     name: Run ${{ matrix.name }} tests
@@ -112,14 +118,14 @@ jobs:
             name: "Linux"
             # Use a larger (16 core, 64GB ram) runner on Linux to speed up execution time.
             # https://github.com/warpdotdev/warp-internal/settings/actions/runners
-            runner: ubuntu-latest-large
+            runner: ${{ needs.params.outputs.linux-runner }}
             # We don't (yet) have any self-hosted Linux runners.
             is_self_hosted: false
             extra_test_args: ""
 
           - os: "windows"
             name: "Windows"
-            runner: windows-latest-large
+            runner: ${{ needs.params.outputs.windows-runner }}
             # We don't (yet) have any self-hosted Windows runners.
             is_self_hosted: false
             extra_test_args: "--exclude command-signatures-v2 --exclude warp_js"
@@ -486,7 +492,7 @@ jobs:
             name: "Linux"
             # Use a larger (16 core, 64GB ram) runner on Linux to speed up execution time.
             # https://github.com/warpdotdev/warp-internal/settings/actions/runners
-            runner: ubuntu-latest-large
+            runner: ${{ needs.params.outputs.linux-runner }}
             # We don't (yet) have any self-hosted Linux runners.
             is_self_hosted: false
             null_device: "/dev/null"
@@ -494,7 +500,7 @@ jobs:
 
           - os: "windows"
             name: "Windows"
-            runner: windows-latest-large
+            runner: ${{ needs.params.outputs.windows-runner }}
             # We don't (yet) have any self-hosted Windows runners.
             is_self_hosted: false
             null_device: "NUL"
@@ -638,14 +644,14 @@ jobs:
             name: "Linux"
             # Use a larger (16 core, 64GB ram) runner on Linux to speed up execution time.
             # https://github.com/warpdotdev/warp-internal/settings/actions/runners
-            runner: ubuntu-latest-large
+            runner: ${{ needs.params.outputs.linux-runner }}
             # We don't (yet) have any self-hosted Linux runners.
             is_self_hosted: false
             null_device: "/dev/null"
 
           - os: "windows"
             name: "Windows"
-            runner: windows-latest-large
+            runner: ${{ needs.params.outputs.windows-runner }}
             # We don't (yet) have any self-hosted Windows runners.
             is_self_hosted: false
             null_device: "NUL"

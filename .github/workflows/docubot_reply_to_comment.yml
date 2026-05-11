@@ -43,7 +43,8 @@ jobs:
         contains(github.event.comment.body, '@docubot') || inputs.prompt
       )
       && github.actor != 'github-actions[bot]'
-    runs-on: namespace-profile-ubuntu-20-04
+    # 个人 fork 无 Namespace Runner；官方仓库保留 Namespace 标签。
+    runs-on: ${{ github.repository == 'warpdotdev/warp' && 'namespace-profile-ubuntu-20-04' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

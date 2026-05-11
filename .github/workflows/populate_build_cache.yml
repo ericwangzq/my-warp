@@ -19,8 +19,13 @@ on:
 
 name: Populate Build Cache
 
+# 官方 monorepo + 个人主 fork：按工作日/推送触发完整 CI 以预热缓存；其它 fork 默认跳过以节省分钟数。
+env:
+  POPULATE_CI_HERE: ${{ github.repository == 'warpdotdev/warp' || github.repository == 'ericwangzq/my-warp' }}
+
 jobs:
   populate_build_cache:
     name: CI
+    if: env.POPULATE_CI_HERE == 'true'
     uses: ./.github/workflows/ci.yml
     secrets: inherit
